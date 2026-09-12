@@ -117,10 +117,30 @@ export default function Home() {
     }
   }
 
+  function downloadProxyUrl(url: string, index = 1, disposition: "attachment" | "inline" = "attachment") {
+    const params = new URLSearchParams({
+      url,
+      filename: `pixora-${index}`,
+      disposition,
+    });
+    return `/api/download?${params.toString()}`;
+  }
+
   async function fetchImage(url: string) {
-    const response = await fetch(`/api/download?url=${encodeURIComponent(url)}`);
-    if (!response.ok) throw new Error("Could not download this image.");
-    return response.blob();
+    const response = await fetch(downloadProxyUrl(url), { cache: "no-store" });
+    if (!response.ok) {
+      let detail = "Could not download this image.";
+      try {
+        const data = await response.json() as { error?: string };
+        if (data.error) detail = data.error;
+      } catch {
+        // Keep the generic message when the response is not JSON.
+      }
+      throw new Error(detail);
+    }
+    const blob = await response.blob();
+    if (!blob.type.startsWith("image/")) throw new Error("The server did not return an image.");
+    return blob;
   }
 
   function saveBlob(blob: Blob, name: string) {
@@ -128,35 +148,57 @@ export default function Home() {
     const anchor = document.createElement("a");
     anchor.href = href;
     anchor.download = name;
+    anchor.style.display = "none";
     document.body.appendChild(anchor);
     anchor.click();
     anchor.remove();
-    window.setTimeout(() => URL.revokeObjectURL(href), 1000);
+    window.setTimeout(() => URL.revokeObjectURL(href), 5000);
   }
 
-  async function downloadOne(url: string, index = 1) {
-    const blob = await fetchImage(url);
-    const extension = blob.type.includes("jpeg") ? "jpg" : blob.type.includes("webp") ? "webp" : "png";
-    saveBlob(blob, `pixora-${index}.${extension}`);
+  function extensionForBlob(blob: Blob) {
+    if (blob.type.includes("jpeg")) return "jpg";
+    if (blob.type.includes("webp")) return "webp";
+    if (blob.type.includes("gif")) return "gif";
+    if (blob.type.includes("avif")) return "avif";
+    return "png";
+  }
+
+  function requestDirectDownload(url: string, index = 1) {
+    const frame = document.createElement("iframe");
+    frame.style.display = "none";
+    frame.src = downloadProxyUrl(url, index, "attachment");
+    frame.setAttribute("aria-hidden", "true");
+    document.body.appendChild(frame);
+    window.setTimeout(() => frame.remove(), 60_000);
+  }
+
+  function downloadOne(url: string, index = 1) {
+    setMessage("");
+    requestDirectDownload(url, index);
   }
 
   async function downloadSelected(mode: "zip" | "separate") {
     if (!selected.length) return;
     setDownloading(true);
     setDownloadMenu(false);
+    setMessage("");
+
     try {
       if (mode === "separate") {
-        for (let index = 0; index < selected.length; index++) await downloadOne(selected[index], index + 1);
-      } else {
-        const JSZip = (await import("jszip")).default;
-        const zip = new JSZip();
-        await Promise.all(selected.map(async (url, index) => {
-          const blob = await fetchImage(url);
-          const extension = blob.type.includes("jpeg") ? "jpg" : blob.type.includes("webp") ? "webp" : "png";
-          zip.file(`pixora-${index + 1}.${extension}`, blob);
-        }));
-        saveBlob(await zip.generateAsync({ type: "blob" }), "pixora-images.zip");
+        selected.forEach((url, index) => requestDirectDownload(url, index + 1));
+        return;
       }
+
+      const JSZip = (await import("jszip")).default;
+      const zip = new JSZip();
+      const images = await Promise.all(selected.map(async (url, index) => ({ index, blob: await fetchImage(url) })));
+
+      for (const { index, blob } of images) {
+        zip.file(`pixora-${index + 1}.${extensionForBlob(blob)}`, blob);
+      }
+
+      const zipBlob = await zip.generateAsync({ type: "blob" });
+      saveBlob(zipBlob, "pixora-images.zip");
     } catch (error) {
       setMessage(error instanceof Error ? error.message : "Download failed");
     } finally {
@@ -211,7 +253,7 @@ export default function Home() {
             <div><button className={`selectToggle ${selecting ? "active" : ""}`} onClick={() => { setSelecting(!selecting); setSelected([]); setDownloadMenu(false); }}>{selecting ? "Done" : "Select"}</button>{selecting && <button className="selectAll" onClick={() => setSelected(selected.length === history.length ? [] : history.map((item) => item.url))}>{selected.length === history.length ? "Clear all" : "Select all"}</button>}</div>
             {selecting && <div className="downloadWrap"><button className="downloadSelected" disabled={!selected.length || downloading} onClick={() => setDownloadMenu(!downloadMenu)}>{downloading ? "Preparing…" : `Download ${selected.length || ""}`} <span>⌄</span></button>{downloadMenu && <div className="downloadMenu"><button onClick={() => downloadSelected("zip")}><b>ZIP archive</b><small>One file with all selected images</small></button><button onClick={() => downloadSelected("separate")}><b>Separate files</b><small>Download every image individually</small></button></div>}</div>}
           </div>}
-          {tab === "result" ? <div className="resultArea">{result ? <div className="resultCard"><img src={result} alt="AI generated edit" /><div className="resultActions"><button onClick={() => downloadOne(result)}>↓ Download</button><a href={result} target="_blank" rel="noreferrer">Open full size ↗</a></div></div> : <div className="emptyResult"><span>✦</span><h3>Your creation will appear here</h3><p>Upload an image, write a prompt, and let Pixora do the rest.</p></div>}</div> : <div className={`historyGrid ${selecting ? "selecting" : ""}`}>{history.length ? history.map((item) => <article key={item.createdAt} className={selected.includes(item.url) ? "selected" : ""} onClick={() => selecting ? toggleSelection(item.url) : (setResult(item.url), setTab("result"))} role="button" tabIndex={0} onKeyDown={(event) => event.key === "Enter" && (selecting ? toggleSelection(item.url) : (setResult(item.url), setTab("result")))}>{selecting && <span className="check">{selected.includes(item.url) ? "✓" : ""}</span>}<img src={item.url} alt={item.prompt} /><div className="historyCaption"><span>{item.prompt}</span>{!selecting && <button aria-label="Download image" onClick={(event) => { event.stopPropagation(); downloadOne(item.url); }}>↓</button>}</div></article>) : <div className="emptyResult"><h3>No edits yet</h3><p>Edits stay on this device for 24 hours.</p></div>}</div>}
+          {tab === "result" ? <div className="resultArea">{result ? <div className="resultCard"><img src={result} alt="AI generated edit" /><div className="resultActions"><button onClick={() => downloadOne(result)}>↓ Download</button><a href={downloadProxyUrl(result, 1, "inline")} target="_blank" rel="noopener noreferrer">Open full size ↗</a></div></div> : <div className="emptyResult"><span>✦</span><h3>Your creation will appear here</h3><p>Upload an image, write a prompt, and let Pixora do the rest.</p></div>}</div> : <div className={`historyGrid ${selecting ? "selecting" : ""}`}>{history.length ? history.map((item) => <article key={item.createdAt} className={selected.includes(item.url) ? "selected" : ""} onClick={() => selecting ? toggleSelection(item.url) : (setResult(item.url), setTab("result"))} role="button" tabIndex={0} onKeyDown={(event) => event.key === "Enter" && (selecting ? toggleSelection(item.url) : (setResult(item.url), setTab("result")))}>{selecting && <span className="check">{selected.includes(item.url) ? "✓" : ""}</span>}<img src={item.url} alt={item.prompt} /><div className="historyCaption"><span>{item.prompt}</span>{!selecting && <button aria-label="Download image" onClick={(event) => { event.stopPropagation(); downloadOne(item.url); }}>↓</button>}</div></article>) : <div className="emptyResult"><h3>No edits yet</h3><p>Edits stay on this device for 24 hours.</p></div>}</div>}
         </div>
       </section>
 
