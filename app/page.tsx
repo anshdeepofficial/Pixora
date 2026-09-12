@@ -8,6 +8,7 @@ type HistoryItem = { url: string; prompt: string; createdAt: string };
 
 export default function Home() {
   const inputRef = useRef<HTMLInputElement>(null);
+  const uploadSequence = useRef(0);
   const [file, setFile] = useState<File | null>(null);
   const [preview, setPreview] = useState("");
   const [prompt, setPrompt] = useState("");
@@ -17,11 +18,32 @@ export default function Home() {
   const [message, setMessage] = useState("");
   const [tab, setTab] = useState<"result" | "history">("result");
   const [history, setHistory] = useState<HistoryItem[]>([]);
+  const [uploadedUrl, setUploadedUrl] = useState("");
+  const [uploading, setUploading] = useState(false);
 
   useEffect(() => {
-    const saved = localStorage.getItem("pixora-history");
-    if (saved) setHistory(JSON.parse(saved));
+    const prune = () => {
+      const saved = localStorage.getItem("pixora-history");
+      const cutoff = Date.now() - 24 * 60 * 60 * 1000;
+      const fresh: HistoryItem[] = saved ? (JSON.parse(saved) as HistoryItem[]).filter((item) => new Date(item.createdAt).getTime() > cutoff) : [];
+      setHistory(fresh);
+      localStorage.setItem("pixora-history", JSON.stringify(fresh));
+    };
+    prune();
+    const timer = window.setInterval(prune, 60_000);
+    return () => window.clearInterval(timer);
   }, []);
+
+  async function uploadImage(image: File) {
+    const upload = await fetch("/api/upload", {
+      method: "POST",
+      headers: { "Content-Type": image.type, "X-File-Name": encodeURIComponent(image.name) },
+      body: image,
+    });
+    const uploaded = await upload.json() as { url?: string; error?: string };
+    if (!upload.ok || !uploaded.url) throw new Error(uploaded.error || "Upload failed");
+    return uploaded.url;
+  }
 
   function chooseFile(next?: File) {
     if (!next || !next.type.startsWith("image/")) return;
@@ -30,6 +52,16 @@ export default function Home() {
     setPreview(URL.createObjectURL(next));
     setResult("");
     setMessage("");
+    setUploadedUrl("");
+    const sequence = ++uploadSequence.current;
+    setUploading(true);
+    uploadImage(next).then((url) => {
+      if (sequence === uploadSequence.current) setUploadedUrl(url);
+    }).catch((error) => {
+      if (sequence === uploadSequence.current) setMessage(error instanceof Error ? error.message : "Upload failed");
+    }).finally(() => {
+      if (sequence === uploadSequence.current) setUploading(false);
+    });
   }
 
   function onDrop(event: DragEvent<HTMLDivElement>) {
@@ -40,22 +72,16 @@ export default function Home() {
   async function generate() {
     if (!file || !prompt.trim()) return;
     setBusy(true);
-    setMessage("Uploading your image securely…");
+    setMessage(uploadedUrl ? "Creating your edit with V-Editor…" : "Finishing your secure upload…");
     setTab("result");
     try {
-      const upload = await fetch("/api/upload", {
-        method: "POST",
-        headers: { "Content-Type": file.type, "X-File-Name": encodeURIComponent(file.name) },
-        body: file,
-      });
-      const uploaded = await upload.json() as { url?: string; error?: string };
-      if (!upload.ok || !uploaded.url) throw new Error(uploaded.error || "Upload failed");
-
+      const imageUrl = uploadedUrl || await uploadImage(file);
+      setUploadedUrl(imageUrl);
       setMessage("Creating your edit with V-Editor…");
       const create = await fetch("/api/generate", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ imageUrl: uploaded.url, prompt: prompt.trim(), aspectRatio: ratio }),
+        body: JSON.stringify({ imageUrl, prompt: prompt.trim(), aspectRatio: ratio }),
       });
       const created = await create.json() as { taskId?: string; error?: string };
       if (!create.ok || !created.taskId) throw new Error(created.error || "Could not start generation");
@@ -67,9 +93,11 @@ export default function Home() {
         if (status.status === "succeeded" && status.output?.[0]) {
           const item = { url: status.output[0], prompt: prompt.trim(), createdAt: new Date().toISOString() };
           setResult(item.url);
-          const next = [item, ...history].slice(0, 12);
-          setHistory(next);
-          localStorage.setItem("pixora-history", JSON.stringify(next));
+          setHistory((current) => {
+            const next = [item, ...current].slice(0, 12);
+            localStorage.setItem("pixora-history", JSON.stringify(next));
+            return next;
+          });
           setMessage("");
           return;
         }
@@ -111,18 +139,19 @@ export default function Home() {
             <label className="promptLabel" htmlFor="prompt">YOUR PROMPT</label>
             <textarea id="prompt" value={prompt} onChange={(e) => setPrompt(e.target.value)} placeholder="Make the scene look like golden hour, keep the person unchanged…" maxLength={700} />
             <div className="promptMeta"><button onClick={() => setPrompt("Replace the background with a warm, cinematic sunset while keeping the subject unchanged.")}>✦ Try an example</button><span>{prompt.length}/700</span></div>
-            <div className="modelRow"><div><span>MODEL</span><strong><b>V</b> V-Editor Standard</strong></div><span className="fast">FAST · 1K</span></div>
-            <div className="ratioLabel"><span>ASPECT RATIO</span><span>{ratio === "default" ? "Match original" : ratio}</span></div>
-            <div className="ratios">{ratios.map((item) => <button key={item} className={ratio === item ? "active" : ""} onClick={() => setRatio(item)}>{item === "default" ? "Original" : item}</button>)}</div>
-            <button className="generate" disabled={!file || !prompt.trim() || busy} onClick={generate}>{busy ? <><span className="spinner" /> {message}</> : <>Generate edit <span>→</span></>}</button>
+            <div className="ratioPanel">
+              <div className="ratioLabel"><div><span>OUTPUT FORMAT</span><small>Choose the perfect canvas</small></div><strong>{ratio === "default" ? "Original" : ratio}</strong></div>
+              <div className="ratios">{ratios.map((item) => <button key={item} className={ratio === item ? "active" : ""} onClick={() => setRatio(item)} aria-label={`Use ${item === "default" ? "original" : item} aspect ratio`}><i className={`ratioShape ratio-${item.replace(":", "x")}`} />{item === "default" ? "Auto" : item}</button>)}</div>
+            </div>
+            <button className="generate" disabled={!file || !prompt.trim() || busy} onClick={generate}>{busy ? <><span className="spinner" /> {message}</> : <>{uploading ? "Preparing image…" : "Generate edit"} <span>→</span></>}</button>
             {!busy && message && <p className="error">{message}</p>}
-            <p className="fineprint">Unlimited interface trials · API usage is billed by your VModel account</p>
+            <p className="fineprint">Unlimited access · History automatically clears after 24 hours</p>
           </div>
         </div>
 
         <div className="output">
-          <div className="tabs"><button className={tab === "result" ? "active" : ""} onClick={() => setTab("result")}>Result</button><button className={tab === "history" ? "active" : ""} onClick={() => setTab("history")}>History <span>{history.length}</span></button></div>
-          {tab === "result" ? <div className="resultArea">{result ? <div className="resultCard"><img src={result} alt="AI generated edit" /><a href={result} target="_blank" rel="noreferrer">Open full result ↗</a></div> : <div className="emptyResult"><span>✦</span><h3>Your creation will appear here</h3><p>Upload an image, write a prompt, and let Pixora do the rest.</p></div>}</div> : <div className="historyGrid">{history.length ? history.map((item) => <button key={item.createdAt} onClick={() => { setResult(item.url); setTab("result"); }}><img src={item.url} alt={item.prompt} /><span>{item.prompt}</span></button>) : <div className="emptyResult"><h3>No edits yet</h3><p>Your latest creations will be saved on this device.</p></div>}</div>}
+          <div className="tabs"><button className={tab === "result" ? "active" : ""} onClick={() => setTab("result")}>Result</button><button className={tab === "history" ? "active" : ""} onClick={() => setTab("history")}>24h History <span>{history.length}</span></button></div>
+          {tab === "result" ? <div className="resultArea">{result ? <div className="resultCard"><img src={result} alt="AI generated edit" /><a href={result} target="_blank" rel="noreferrer">Open full result ↗</a></div> : <div className="emptyResult"><span>✦</span><h3>Your creation will appear here</h3><p>Upload an image, write a prompt, and let Pixora do the rest.</p></div>}</div> : <div className="historyGrid">{history.length ? history.map((item) => <button key={item.createdAt} onClick={() => { setResult(item.url); setTab("result"); }}><img src={item.url} alt={item.prompt} /><span>{item.prompt}</span></button>) : <div className="emptyResult"><h3>No edits yet</h3><p>Edits stay on this device for 24 hours.</p></div>}</div>}
         </div>
       </section>
 
