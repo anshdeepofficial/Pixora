@@ -58,6 +58,64 @@ const worker = {
       return new Response(object.body, { headers });
     }
 
+    if (url.pathname === "/api/download" && request.method === "GET") {
+      const value = url.searchParams.get("url");
+      if (!value) return json({ error: "Image URL is required." }, 400);
+
+      let imageUrl: URL;
+      try {
+        imageUrl = new URL(value);
+      } catch {
+        return json({ error: "Invalid image URL." }, 400);
+      }
+
+      const allowedHosts = ["vmodel.ai", "data.vmodel.ai", "blob.vercel-storage.com"];
+      const allowed = imageUrl.protocol === "https:" && allowedHosts.some(
+        (host) => imageUrl.hostname === host || imageUrl.hostname.endsWith(`.${host}`)
+      );
+      if (!allowed) return json({ error: "This image host is not allowed." }, 403);
+
+      try {
+        const upstream = await fetch(imageUrl.toString(), {
+          redirect: "follow",
+          headers: { Accept: "image/avif,image/webp,image/png,image/jpeg,image/*,*/*;q=0.8" },
+        });
+        if (!upstream.ok || !upstream.body) {
+          return json({ error: `Image could not be downloaded (${upstream.status}).` }, 502);
+        }
+
+        const upstreamType = (upstream.headers.get("content-type") || "").split(";")[0].trim().toLowerCase();
+        const pathExtension = imageUrl.pathname.match(/\.(png|jpe?g|webp|gif|avif)(?:$|\/)/i)?.[1]?.toLowerCase();
+        const extension = upstreamType.includes("jpeg") ? "jpg"
+          : upstreamType.includes("webp") ? "webp"
+          : upstreamType.includes("gif") ? "gif"
+          : upstreamType.includes("avif") ? "avif"
+          : pathExtension?.replace("jpeg", "jpg") || "png";
+        const contentType = upstreamType.startsWith("image/") ? upstreamType : `image/${extension === "jpg" ? "jpeg" : extension}`;
+        const requestedName = (url.searchParams.get("filename") || "pixora-image")
+          .replace(/[^a-zA-Z0-9._-]/g, "-").replace(/-+/g, "-").slice(0, 100);
+        const filename = /\.[a-zA-Z0-9]{2,5}$/.test(requestedName) ? requestedName : `${requestedName}.${extension}`;
+        const disposition = url.searchParams.get("disposition") === "inline" ? "inline" : "attachment";
+
+        return new Response(upstream.body, {
+          headers: {
+            "Content-Type": contentType,
+            "Content-Disposition": `${disposition}; filename="${filename}"`,
+            "Cache-Control": "private, no-store, max-age=0",
+            "X-Content-Type-Options": "nosniff",
+          },
+        });
+      } catch (error) {
+        console.error("Pixora download proxy failed", error);
+        return json({ error: "Image download request failed." }, 502);
+      }
+    }
+
+    if (url.pathname === "/api/stats" && request.method === "GET") {
+      const listed = await env.UPLOADS.list({ prefix: "generations/" });
+      return json({ totalGenerated: 11 + listed.objects.length });
+    }
+
     if (url.pathname === "/api/generate" && request.method === "POST") {
       if (!env.VMODEL_API_TOKEN) return json({ error: "Add your VMODEL_API_TOKEN to connect V-Editor." }, 503);
       const body = await request.json() as { imageUrl?: string; prompt?: string; aspectRatio?: string };
@@ -82,6 +140,13 @@ const worker = {
       const response = await fetch(`https://api.vmodel.ai/api/tasks/v1/get/${encodeURIComponent(taskId)}`, { headers: { "Authorization": `Bearer ${env.VMODEL_API_TOKEN}` } });
       const data = await response.json() as { result?: { status?: string; output?: string[]; error?: string } };
       if (!response.ok || !data.result) return json({ error: "Could not check generation." }, 502);
+      if (data.result.status === "succeeded" && data.result.output?.[0]) {
+        await env.UPLOADS.put(`generations/${taskId}.json`, JSON.stringify({
+          taskId,
+          output: data.result.output[0],
+          completedAt: new Date().toISOString(),
+        }), { httpMetadata: { contentType: "application/json" } });
+      }
       return json({ status: data.result.status, output: data.result.output, error: data.result.error });
     }
 
