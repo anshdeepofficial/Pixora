@@ -26,6 +26,7 @@ export default function Home() {
   const [selected, setSelected] = useState<string[]>([]);
   const [downloadMenu, setDownloadMenu] = useState(false);
   const [downloading, setDownloading] = useState(false);
+  const [totalGenerated, setTotalGenerated] = useState<number | null>(null);
 
   useEffect(() => {
     const prune = () => {
@@ -37,6 +38,13 @@ export default function Home() {
     };
     prune();
     const timer = window.setInterval(prune, 60_000);
+    const loadStats = () => fetch("/api/stats", { cache: "no-store" })
+      .then((response) => response.ok ? response.json() : Promise.reject())
+      .then((data: { totalGenerated?: number }) => {
+        if (typeof data.totalGenerated === "number") setTotalGenerated(data.totalGenerated);
+      })
+      .catch(() => undefined);
+    loadStats();
     return () => window.clearInterval(timer);
   }, []);
 
@@ -103,6 +111,7 @@ export default function Home() {
             localStorage.setItem("pixora-history", JSON.stringify(next));
             return next;
           });
+          setTotalGenerated((current) => current === null ? current : current + 1);
           setMessage("");
           return;
         }
@@ -206,6 +215,17 @@ export default function Home() {
     }
   }
 
+  function clearHistory() {
+    localStorage.removeItem("pixora-history");
+    setHistory([]);
+    setSelected([]);
+    setSelecting(false);
+    setDownloadMenu(false);
+    setResult("");
+    setTab("history");
+    setMessage("");
+  }
+
   function toggleSelection(url: string) {
     setSelected((current) => current.includes(url) ? current.filter((item) => item !== url) : [...current, url]);
   }
@@ -221,7 +241,7 @@ export default function Home() {
         <div className="eyebrow"><span>✦</span> AI PHOTO EDITOR</div>
         <h1>Edit any photo.<br /><em>Just describe it.</em></h1>
         <p>Professional image transformations powered by V-Editor. No layers, no learning curve—just your idea and one prompt.</p>
-        <div className="unlimited"><span>∞</span><div><strong>Unlimited trials</strong><small>Explore freely during early access</small></div></div>
+        <div className="heroBadges"><div className="unlimited"><span>∞</span><div><strong>Unlimited trials</strong><small>Explore freely during early access</small></div></div><div className="generatedCount"><strong>{totalGenerated === null ? "—" : totalGenerated.toLocaleString()}</strong><span>images generated</span></div></div>
       </section>
 
       <section className="studio" aria-label="AI photo editor">
@@ -248,7 +268,7 @@ export default function Home() {
         </div>
 
         <div className="output">
-          <div className="tabs"><button className={tab === "result" ? "active" : ""} onClick={() => setTab("result")}>Result</button><button className={tab === "history" ? "active" : ""} onClick={() => setTab("history")}>24h History <span>{history.length}</span></button></div>
+          <div className="tabs"><div><button className={tab === "result" ? "active" : ""} onClick={() => setTab("result")}>Result</button><button className={tab === "history" ? "active" : ""} onClick={() => setTab("history")}>24h History <span>{history.length}</span></button></div>{history.length > 0 && <button className="clearHistory" onClick={clearHistory}>Clear history</button>}</div>
           {tab === "history" && history.length > 0 && <div className="downloadBar">
             <div><button className={`selectToggle ${selecting ? "active" : ""}`} onClick={() => { setSelecting(!selecting); setSelected([]); setDownloadMenu(false); }}>{selecting ? "Done" : "Select"}</button>{selecting && <button className="selectAll" onClick={() => setSelected(selected.length === history.length ? [] : history.map((item) => item.url))}>{selected.length === history.length ? "Clear all" : "Select all"}</button>}</div>
             {selecting && <div className="downloadWrap"><button className="downloadSelected" disabled={!selected.length || downloading} onClick={() => setDownloadMenu(!downloadMenu)}>{downloading ? "Preparing…" : `Download ${selected.length || ""}`} <span>⌄</span></button>{downloadMenu && <div className="downloadMenu"><button onClick={() => downloadSelected("zip")}><b>ZIP archive</b><small>One file with all selected images</small></button><button onClick={() => downloadSelected("separate")}><b>Separate files</b><small>Download every image individually</small></button></div>}</div>}
