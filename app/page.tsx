@@ -1,0 +1,133 @@
+"use client";
+
+import { ChangeEvent, DragEvent, useEffect, useRef, useState } from "react";
+
+const ratios = ["default", "1:1", "3:2", "2:3", "9:16", "16:9", "3:4", "4:3"];
+
+type HistoryItem = { url: string; prompt: string; createdAt: string };
+
+export default function Home() {
+  const inputRef = useRef<HTMLInputElement>(null);
+  const [file, setFile] = useState<File | null>(null);
+  const [preview, setPreview] = useState("");
+  const [prompt, setPrompt] = useState("");
+  const [ratio, setRatio] = useState("default");
+  const [busy, setBusy] = useState(false);
+  const [result, setResult] = useState("");
+  const [message, setMessage] = useState("");
+  const [tab, setTab] = useState<"result" | "history">("result");
+  const [history, setHistory] = useState<HistoryItem[]>([]);
+
+  useEffect(() => {
+    const saved = localStorage.getItem("pixora-history");
+    if (saved) setHistory(JSON.parse(saved));
+  }, []);
+
+  function chooseFile(next?: File) {
+    if (!next || !next.type.startsWith("image/")) return;
+    if (preview) URL.revokeObjectURL(preview);
+    setFile(next);
+    setPreview(URL.createObjectURL(next));
+    setResult("");
+    setMessage("");
+  }
+
+  function onDrop(event: DragEvent<HTMLDivElement>) {
+    event.preventDefault();
+    chooseFile(event.dataTransfer.files[0]);
+  }
+
+  async function generate() {
+    if (!file || !prompt.trim()) return;
+    setBusy(true);
+    setMessage("Uploading your image securely…");
+    setTab("result");
+    try {
+      const upload = await fetch("/api/upload", {
+        method: "POST",
+        headers: { "Content-Type": file.type, "X-File-Name": encodeURIComponent(file.name) },
+        body: file,
+      });
+      const uploaded = await upload.json() as { url?: string; error?: string };
+      if (!upload.ok || !uploaded.url) throw new Error(uploaded.error || "Upload failed");
+
+      setMessage("Creating your edit with V-Editor…");
+      const create = await fetch("/api/generate", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ imageUrl: uploaded.url, prompt: prompt.trim(), aspectRatio: ratio }),
+      });
+      const created = await create.json() as { taskId?: string; error?: string };
+      if (!create.ok || !created.taskId) throw new Error(created.error || "Could not start generation");
+
+      for (let attempt = 0; attempt < 90; attempt++) {
+        await new Promise((resolve) => setTimeout(resolve, 2000));
+        const statusResponse = await fetch(`/api/task?id=${encodeURIComponent(created.taskId)}`);
+        const status = await statusResponse.json() as { status?: string; output?: string[]; error?: string };
+        if (status.status === "succeeded" && status.output?.[0]) {
+          const item = { url: status.output[0], prompt: prompt.trim(), createdAt: new Date().toISOString() };
+          setResult(item.url);
+          const next = [item, ...history].slice(0, 12);
+          setHistory(next);
+          localStorage.setItem("pixora-history", JSON.stringify(next));
+          setMessage("");
+          return;
+        }
+        if (status.status === "failed") throw new Error(status.error || "Generation failed");
+        setMessage(attempt < 3 ? "The model is warming up…" : "Adding the finishing details…");
+      }
+      throw new Error("Generation took too long. Please try again.");
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "Something went wrong");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <main className="shell">
+      <nav className="nav">
+        <a className="brand" href="#top" aria-label="Pixora home"><span className="brandMark">P</span><span>Pixora</span></a>
+        <div className="navActions"><span className="statusDot"><i /> V-Editor connected</span><a href="#how">How it works</a><a className="support" href="mailto:support@example.com">Support</a></div>
+      </nav>
+
+      <section className="hero" id="top">
+        <div className="eyebrow"><span>✦</span> AI PHOTO EDITOR</div>
+        <h1>Edit any photo.<br /><em>Just describe it.</em></h1>
+        <p>Professional image transformations powered by V-Editor. No layers, no learning curve—just your idea and one prompt.</p>
+        <div className="unlimited"><span>∞</span><div><strong>Unlimited trials</strong><small>Explore freely during early access</small></div></div>
+      </section>
+
+      <section className="studio" aria-label="AI photo editor">
+        <div className="studioTop"><div><span className="step">01</span><h2>Add your image</h2></div><span className="privacy">◆ Private by design</span></div>
+        <div className="workspace">
+          <div className={`dropzone ${preview ? "hasImage" : ""}`} onClick={() => inputRef.current?.click()} onDrop={onDrop} onDragOver={(e) => e.preventDefault()} role="button" tabIndex={0} onKeyDown={(e) => e.key === "Enter" && inputRef.current?.click()}>
+            <input ref={inputRef} type="file" accept="image/png,image/jpeg,image/webp" hidden onChange={(e: ChangeEvent<HTMLInputElement>) => chooseFile(e.target.files?.[0])} />
+            {preview ? <><img src={preview} alt="Selected preview" /><button className="replace" onClick={(e) => { e.stopPropagation(); inputRef.current?.click(); }}>Replace image</button></> : <div className="uploadEmpty"><span className="uploadIcon">↥</span><h3>Drop an image here</h3><p>or click to browse · PNG, JPG or WEBP</p><button>Choose image</button></div>}
+          </div>
+
+          <div className="controls">
+            <div className="controlHeading"><span className="step">02</span><h2>Describe your edit</h2></div>
+            <label className="promptLabel" htmlFor="prompt">YOUR PROMPT</label>
+            <textarea id="prompt" value={prompt} onChange={(e) => setPrompt(e.target.value)} placeholder="Make the scene look like golden hour, keep the person unchanged…" maxLength={700} />
+            <div className="promptMeta"><button onClick={() => setPrompt("Replace the background with a warm, cinematic sunset while keeping the subject unchanged.")}>✦ Try an example</button><span>{prompt.length}/700</span></div>
+            <div className="modelRow"><div><span>MODEL</span><strong><b>V</b> V-Editor Standard</strong></div><span className="fast">FAST · 1K</span></div>
+            <div className="ratioLabel"><span>ASPECT RATIO</span><span>{ratio === "default" ? "Match original" : ratio}</span></div>
+            <div className="ratios">{ratios.map((item) => <button key={item} className={ratio === item ? "active" : ""} onClick={() => setRatio(item)}>{item === "default" ? "Original" : item}</button>)}</div>
+            <button className="generate" disabled={!file || !prompt.trim() || busy} onClick={generate}>{busy ? <><span className="spinner" /> {message}</> : <>Generate edit <span>→</span></>}</button>
+            {!busy && message && <p className="error">{message}</p>}
+            <p className="fineprint">Unlimited interface trials · API usage is billed by your VModel account</p>
+          </div>
+        </div>
+
+        <div className="output">
+          <div className="tabs"><button className={tab === "result" ? "active" : ""} onClick={() => setTab("result")}>Result</button><button className={tab === "history" ? "active" : ""} onClick={() => setTab("history")}>History <span>{history.length}</span></button></div>
+          {tab === "result" ? <div className="resultArea">{result ? <div className="resultCard"><img src={result} alt="AI generated edit" /><a href={result} target="_blank" rel="noreferrer">Open full result ↗</a></div> : <div className="emptyResult"><span>✦</span><h3>Your creation will appear here</h3><p>Upload an image, write a prompt, and let Pixora do the rest.</p></div>}</div> : <div className="historyGrid">{history.length ? history.map((item) => <button key={item.createdAt} onClick={() => { setResult(item.url); setTab("result"); }}><img src={item.url} alt={item.prompt} /><span>{item.prompt}</span></button>) : <div className="emptyResult"><h3>No edits yet</h3><p>Your latest creations will be saved on this device.</p></div>}</div>}
+        </div>
+      </section>
+
+      <section className="how" id="how"><p className="eyebrow">A BETTER WAY TO EDIT</p><h2>From idea to image<br />in three simple steps.</h2><div className="howGrid"><article><span>01</span><h3>Upload</h3><p>Choose any portrait, product shot, interior, or landscape.</p></article><article><span>02</span><h3>Describe</h3><p>Tell the editor exactly what should change—and what should stay.</p></article><article><span>03</span><h3>Create</h3><p>Get a polished, high-quality edit ready to download and share.</p></article></div></section>
+      <footer><a className="brand" href="#top"><span className="brandMark">P</span><span>Pixora</span></a><p>AI editing, without the complexity.</p><span>Powered by VModel V-Editor</span></footer>
+    </main>
+  );
+}
