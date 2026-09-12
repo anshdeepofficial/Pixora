@@ -20,6 +20,10 @@ export default function Home() {
   const [history, setHistory] = useState<HistoryItem[]>([]);
   const [uploadedUrl, setUploadedUrl] = useState("");
   const [uploading, setUploading] = useState(false);
+  const [selecting, setSelecting] = useState(false);
+  const [selected, setSelected] = useState<string[]>([]);
+  const [downloadMenu, setDownloadMenu] = useState(false);
+  const [downloading, setDownloading] = useState(false);
 
   useEffect(() => {
     const prune = () => {
@@ -112,6 +116,57 @@ export default function Home() {
     }
   }
 
+  async function fetchImage(url: string) {
+    const response = await fetch(`/api/download?url=${encodeURIComponent(url)}`);
+    if (!response.ok) throw new Error("Could not download this image.");
+    return response.blob();
+  }
+
+  function saveBlob(blob: Blob, name: string) {
+    const href = URL.createObjectURL(blob);
+    const anchor = document.createElement("a");
+    anchor.href = href;
+    anchor.download = name;
+    document.body.appendChild(anchor);
+    anchor.click();
+    anchor.remove();
+    window.setTimeout(() => URL.revokeObjectURL(href), 1000);
+  }
+
+  async function downloadOne(url: string, index = 1) {
+    const blob = await fetchImage(url);
+    const extension = blob.type.includes("jpeg") ? "jpg" : blob.type.includes("webp") ? "webp" : "png";
+    saveBlob(blob, `pixora-${index}.${extension}`);
+  }
+
+  async function downloadSelected(mode: "zip" | "separate") {
+    if (!selected.length) return;
+    setDownloading(true);
+    setDownloadMenu(false);
+    try {
+      if (mode === "separate") {
+        for (let index = 0; index < selected.length; index++) await downloadOne(selected[index], index + 1);
+      } else {
+        const JSZip = (await import("jszip")).default;
+        const zip = new JSZip();
+        await Promise.all(selected.map(async (url, index) => {
+          const blob = await fetchImage(url);
+          const extension = blob.type.includes("jpeg") ? "jpg" : blob.type.includes("webp") ? "webp" : "png";
+          zip.file(`pixora-${index + 1}.${extension}`, blob);
+        }));
+        saveBlob(await zip.generateAsync({ type: "blob" }), "pixora-images.zip");
+      }
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "Download failed");
+    } finally {
+      setDownloading(false);
+    }
+  }
+
+  function toggleSelection(url: string) {
+    setSelected((current) => current.includes(url) ? current.filter((item) => item !== url) : [...current, url]);
+  }
+
   return (
     <main className="shell">
       <nav className="nav">
@@ -151,7 +206,11 @@ export default function Home() {
 
         <div className="output">
           <div className="tabs"><button className={tab === "result" ? "active" : ""} onClick={() => setTab("result")}>Result</button><button className={tab === "history" ? "active" : ""} onClick={() => setTab("history")}>24h History <span>{history.length}</span></button></div>
-          {tab === "result" ? <div className="resultArea">{result ? <div className="resultCard"><img src={result} alt="AI generated edit" /><a href={result} target="_blank" rel="noreferrer">Open full result ↗</a></div> : <div className="emptyResult"><span>✦</span><h3>Your creation will appear here</h3><p>Upload an image, write a prompt, and let Pixora do the rest.</p></div>}</div> : <div className="historyGrid">{history.length ? history.map((item) => <button key={item.createdAt} onClick={() => { setResult(item.url); setTab("result"); }}><img src={item.url} alt={item.prompt} /><span>{item.prompt}</span></button>) : <div className="emptyResult"><h3>No edits yet</h3><p>Edits stay on this device for 24 hours.</p></div>}</div>}
+          {tab === "history" && history.length > 0 && <div className="downloadBar">
+            <div><button className={`selectToggle ${selecting ? "active" : ""}`} onClick={() => { setSelecting(!selecting); setSelected([]); setDownloadMenu(false); }}>{selecting ? "Done" : "Select"}</button>{selecting && <button className="selectAll" onClick={() => setSelected(selected.length === history.length ? [] : history.map((item) => item.url))}>{selected.length === history.length ? "Clear all" : "Select all"}</button>}</div>
+            {selecting && <div className="downloadWrap"><button className="downloadSelected" disabled={!selected.length || downloading} onClick={() => setDownloadMenu(!downloadMenu)}>{downloading ? "Preparing…" : `Download ${selected.length || ""}`} <span>⌄</span></button>{downloadMenu && <div className="downloadMenu"><button onClick={() => downloadSelected("zip")}><b>ZIP archive</b><small>One file with all selected images</small></button><button onClick={() => downloadSelected("separate")}><b>Separate files</b><small>Download every image individually</small></button></div>}</div>}
+          </div>}
+          {tab === "result" ? <div className="resultArea">{result ? <div className="resultCard"><img src={result} alt="AI generated edit" /><div className="resultActions"><button onClick={() => downloadOne(result)}>↓ Download</button><a href={result} target="_blank" rel="noreferrer">Open full size ↗</a></div></div> : <div className="emptyResult"><span>✦</span><h3>Your creation will appear here</h3><p>Upload an image, write a prompt, and let Pixora do the rest.</p></div>}</div> : <div className={`historyGrid ${selecting ? "selecting" : ""}`}>{history.length ? history.map((item) => <article key={item.createdAt} className={selected.includes(item.url) ? "selected" : ""} onClick={() => selecting ? toggleSelection(item.url) : (setResult(item.url), setTab("result"))} role="button" tabIndex={0} onKeyDown={(event) => event.key === "Enter" && (selecting ? toggleSelection(item.url) : (setResult(item.url), setTab("result")))}>{selecting && <span className="check">{selected.includes(item.url) ? "✓" : ""}</span>}<img src={item.url} alt={item.prompt} /><div className="historyCaption"><span>{item.prompt}</span>{!selecting && <button aria-label="Download image" onClick={(event) => { event.stopPropagation(); downloadOne(item.url); }}>↓</button>}</div></article>) : <div className="emptyResult"><h3>No edits yet</h3><p>Edits stay on this device for 24 hours.</p></div>}</div>}
         </div>
       </section>
 
