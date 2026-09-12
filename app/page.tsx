@@ -1,6 +1,7 @@
 "use client";
 
 import { ChangeEvent, DragEvent, useEffect, useRef, useState } from "react";
+import { upload } from "@vercel/blob/client";
 
 const ratios = ["default", "1:1", "3:2", "2:3", "9:16", "16:9", "3:4", "4:3"];
 
@@ -9,6 +10,7 @@ type HistoryItem = { url: string; prompt: string; createdAt: string };
 export default function Home() {
   const inputRef = useRef<HTMLInputElement>(null);
   const uploadSequence = useRef(0);
+  const uploadPromise = useRef<Promise<string> | null>(null);
   const [file, setFile] = useState<File | null>(null);
   const [preview, setPreview] = useState("");
   const [prompt, setPrompt] = useState("");
@@ -39,14 +41,11 @@ export default function Home() {
   }, []);
 
   async function uploadImage(image: File) {
-    const upload = await fetch("/api/upload", {
-      method: "POST",
-      headers: { "Content-Type": image.type, "X-File-Name": encodeURIComponent(image.name) },
-      body: image,
+    const blob = await upload(`pixora-inputs/${Date.now()}-${image.name.replace(/[^a-zA-Z0-9._-]/g, "-")}`, image, {
+      access: "public",
+      handleUploadUrl: "/api/upload",
     });
-    const uploaded = await upload.json() as { url?: string; error?: string };
-    if (!upload.ok || !uploaded.url) throw new Error(uploaded.error || "Upload failed");
-    return uploaded.url;
+    return blob.url;
   }
 
   function chooseFile(next?: File) {
@@ -59,7 +58,9 @@ export default function Home() {
     setUploadedUrl("");
     const sequence = ++uploadSequence.current;
     setUploading(true);
-    uploadImage(next).then((url) => {
+    const pendingUpload = uploadImage(next);
+    uploadPromise.current = pendingUpload;
+    pendingUpload.then((url) => {
       if (sequence === uploadSequence.current) setUploadedUrl(url);
     }).catch((error) => {
       if (sequence === uploadSequence.current) setMessage(error instanceof Error ? error.message : "Upload failed");
@@ -79,7 +80,7 @@ export default function Home() {
     setMessage(uploadedUrl ? "Creating your edit with V-Editor…" : "Finishing your secure upload…");
     setTab("result");
     try {
-      const imageUrl = uploadedUrl || await uploadImage(file);
+      const imageUrl = uploadedUrl || await (uploadPromise.current || uploadImage(file));
       setUploadedUrl(imageUrl);
       setMessage("Creating your edit with V-Editor…");
       const create = await fetch("/api/generate", {
@@ -90,8 +91,8 @@ export default function Home() {
       const created = await create.json() as { taskId?: string; error?: string };
       if (!create.ok || !created.taskId) throw new Error(created.error || "Could not start generation");
 
-      for (let attempt = 0; attempt < 90; attempt++) {
-        await new Promise((resolve) => setTimeout(resolve, 2000));
+      for (let attempt = 0; attempt < 120; attempt++) {
+        if (attempt > 0) await new Promise((resolve) => setTimeout(resolve, 1000));
         const statusResponse = await fetch(`/api/task?id=${encodeURIComponent(created.taskId)}`);
         const status = await statusResponse.json() as { status?: string; output?: string[]; error?: string };
         if (status.status === "succeeded" && status.output?.[0]) {
