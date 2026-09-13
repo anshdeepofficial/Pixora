@@ -14,8 +14,8 @@ export async function POST(request: Request) {
   const body = await request.json() as BatchBody;
   const imageUrls = Array.isArray(body.imageUrls) ? body.imageUrls : [];
   if (!body.prompt?.trim()) return Response.json({ error: "A prompt is required." }, { status: 400 });
-  if (imageUrls.length < 1 || imageUrls.length > 10) {
-    return Response.json({ error: "Batch generation supports 1 to 10 images." }, { status: 400 });
+  if (imageUrls.length < 1 || imageUrls.length > 50) {
+    return Response.json({ error: "Batch generation supports 1 to 50 images." }, { status: 400 });
   }
   if (imageUrls.some((url) => typeof url !== "string" || !url.startsWith("https://"))) {
     return Response.json({ error: "One or more uploaded image URLs are invalid." }, { status: 400 });
