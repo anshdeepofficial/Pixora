@@ -1,4 +1,11 @@
-const ALLOWED_HOSTS = ["vmodel.ai", "data.vmodel.ai", "blob.vercel-storage.com"];
+const ALLOWED_HOSTS = [
+  "vmodel.ai",
+  "replicate.delivery",
+  "fal.media",
+  "storage.googleapis.com",
+  "blob.vercel-storage.com",
+  "r2.cloudflarestorage.com",
+];
 
 function isAllowedImageUrl(imageUrl: URL) {
   return imageUrl.protocol === "https:" && ALLOWED_HOSTS.some((host) => imageUrl.hostname === host || imageUrl.hostname.endsWith(`.${host}`));
@@ -34,7 +41,7 @@ export async function GET(request: Request) {
   }
 
   if (!isAllowedImageUrl(imageUrl)) {
-    return Response.json({ error: "This image host is not allowed." }, { status: 403 });
+    return Response.json({ error: `This image host is not allowed: ${imageUrl.hostname}` }, { status: 403 });
   }
 
   try {
@@ -56,16 +63,16 @@ export async function GET(request: Request) {
     const extension = extensionFromType(contentType, imageUrl);
     const filename = safeFilename(requestUrl.searchParams.get("filename"), extension);
     const disposition = requestUrl.searchParams.get("disposition") === "inline" ? "inline" : "attachment";
-
-    return new Response(upstream.body, {
-      status: 200,
-      headers: {
-        "Content-Type": contentType,
-        "Content-Disposition": `${disposition}; filename="${filename}"`,
-        "Cache-Control": "private, no-store, max-age=0",
-        "X-Content-Type-Options": "nosniff",
-      },
+    const headers = new Headers({
+      "Content-Type": contentType,
+      "Content-Disposition": `${disposition}; filename="${filename}"`,
+      "Cache-Control": "private, no-store, max-age=0",
+      "X-Content-Type-Options": "nosniff",
     });
+    const length = upstream.headers.get("content-length");
+    if (length) headers.set("Content-Length", length);
+
+    return new Response(upstream.body, { status: 200, headers });
   } catch (error) {
     console.error("Pixora download proxy failed", error);
     return Response.json({ error: "Image download request failed." }, { status: 502 });
