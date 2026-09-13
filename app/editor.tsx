@@ -113,6 +113,14 @@ export default function Editor() {
   const [selected, setSelected] = useState<string[]>([]);
   const [downloadMenu, setDownloadMenu] = useState(false);
   const [downloading, setDownloading] = useState(false);
+  const [downloadProgress, setDownloadProgress] = useState<ProgressState>({ percent: 0, label: "", state: "idle" });
+  const [downloadedUrls, setDownloadedUrls] = useState<string[]>([]);
+  const [downloadNoticeUrl, setDownloadNoticeUrl] = useState("");
+  const [viewerUrls, setViewerUrls] = useState<string[]>([]);
+  const [viewerIndex, setViewerIndex] = useState(0);
+  const swipeStart = useRef<number | null>(null);
+
+  const isProcessing = singleBusy || batchBusy || referenceBusy;
 
   useEffect(() => {
     const prune = () => {
@@ -145,7 +153,7 @@ export default function Editor() {
   function addHistory(url: string, prompt: string) {
     const item = { url, prompt, createdAt: new Date().toISOString() };
     setHistory((current) => {
-      const next = [item, ...current].slice(0, 40);
+      const next = [item, ...current];
       localStorage.setItem("pixora-history", JSON.stringify(next));
       return next;
     });
@@ -347,16 +355,6 @@ export default function Editor() {
     return `/api/download?${params.toString()}`;
   }
 
-  function triggerDownload(url: string, index = 1) {
-    const anchor = document.createElement("a");
-    anchor.href = downloadProxyUrl(url, index, "attachment");
-    anchor.rel = "noopener";
-    anchor.style.display = "none";
-    document.body.appendChild(anchor);
-    anchor.click();
-    anchor.remove();
-  }
-
   async function fetchImage(url: string) {
     const response = await fetch(downloadProxyUrl(url), { cache: "no-store" });
     if (!response.ok) {
@@ -385,37 +383,76 @@ export default function Editor() {
     window.setTimeout(() => URL.revokeObjectURL(href), 5000);
   }
 
-  function downloadOne(url: string, index = 1) {
-    triggerDownload(url, index);
+  async function downloadOne(url: string, index = 1) {
+    setDownloadProgress({ percent: 10, label: "Preparing image…", state: "working" });
+    try {
+      const blob = await fetchImage(url);
+      setDownloadProgress({ percent: 85, label: "Saving image…", state: "working" });
+      saveBlob(blob, `pixora-${index}.${extensionForBlob(blob)}`);
+      setDownloadedUrls((current) => current.includes(url) ? current : [...current, url]);
+      setDownloadNoticeUrl(url);
+      window.setTimeout(() => setDownloadNoticeUrl(""), 1600);
+      setDownloadProgress({ percent: 100, label: "Downloaded", state: "done" });
+      window.setTimeout(() => setDownloadProgress({ percent: 0, label: "", state: "idle" }), 1800);
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : "Download failed";
+      setSingleMessage(detail);
+      setDownloadProgress({ percent: 100, label: detail, state: "error" });
+    }
   }
 
   async function downloadMany(urls: string[], kind: "zip" | "separate") {
     if (!urls.length) return;
     if (kind === "separate") {
-      urls.forEach((url, index) => window.setTimeout(() => triggerDownload(url, index + 1), index * 250));
+      for (let index = 0; index < urls.length; index++) {
+        setDownloadProgress({ percent: (index / urls.length) * 100, label: `Downloading ${index + 1} of ${urls.length}…`, state: "working" });
+        const blob = await fetchImage(urls[index]);
+        saveBlob(blob, `pixora-${index + 1}.${extensionForBlob(blob)}`);
+        setDownloadedUrls((current) => current.includes(urls[index]) ? current : [...current, urls[index]]);
+        setDownloadProgress({ percent: ((index + 1) / urls.length) * 100, label: `Downloaded ${index + 1} of ${urls.length}`, state: "working" });
+      }
+      setDownloadProgress({ percent: 100, label: `Downloaded ${urls.length} images`, state: "done" });
       return;
     }
-    const images = await Promise.all(urls.map(async (url, index) => ({ index, blob: await fetchImage(url) })));
+    let fetched = 0;
+    const images = await Promise.all(urls.map(async (url, index) => {
+      const blob = await fetchImage(url);
+      fetched += 1;
+      setDownloadProgress({ percent: (fetched / urls.length) * 85, label: `Adding ${fetched} of ${urls.length} images…`, state: "working" });
+      return { index, blob };
+    }));
     const JSZip = (await import("jszip")).default;
     const zip = new JSZip();
     images.forEach(({ index, blob }) => zip.file(`pixora-${index + 1}.${extensionForBlob(blob)}`, blob));
-    saveBlob(await zip.generateAsync({ type: "blob" }), "pixora-images.zip");
+    const archive = await zip.generateAsync({ type: "blob" }, (metadata) => {
+      setDownloadProgress({ percent: 85 + metadata.percent * 0.15, label: `Creating ZIP · ${Math.round(metadata.percent)}%`, state: "working" });
+    });
+    saveBlob(archive, "pixora-images.zip");
+    setDownloadedUrls((current) => Array.from(new Set([...current, ...urls])));
+    setDownloadProgress({ percent: 100, label: "ZIP downloaded", state: "done" });
   }
 
   async function downloadSelected(kind: "zip" | "separate") {
     if (!selected.length) return;
     setDownloading(true); setDownloadMenu(false); setSingleMessage("");
     try { await downloadMany(selected, kind); } catch (error) { setSingleMessage(error instanceof Error ? error.message : "Download failed"); }
-    finally { setDownloading(false); }
+    finally {
+      setDownloading(false);
+      window.setTimeout(() => setDownloadProgress({ percent: 0, label: "", state: "idle" }), 1800);
+    }
   }
 
   async function downloadBatch(kind: "zip" | "separate") {
     setBatchDownloading(true); setBatchMessage("");
     try { await downloadMany(batchResults, kind); } catch (error) { setBatchMessage(error instanceof Error ? error.message : "Download failed"); }
-    finally { setBatchDownloading(false); }
+    finally {
+      setBatchDownloading(false);
+      window.setTimeout(() => setDownloadProgress({ percent: 0, label: "", state: "idle" }), 1800);
+    }
   }
 
   function clearHistory() {
+    if (isProcessing) return;
     localStorage.removeItem("pixora-history"); setHistory([]); setSelected([]); setSelecting(false); setDownloadMenu(false); setOutputTab("history");
   }
 
@@ -423,9 +460,29 @@ export default function Editor() {
     setSelected((current) => current.includes(url) ? current.filter((item) => item !== url) : [...current, url]);
   }
 
-  function singleDrop(event: DragEvent<HTMLDivElement>) { event.preventDefault(); setSingleFileSafe(event.dataTransfer.files[0]); }
-  function batchDrop(event: DragEvent<HTMLDivElement>) { event.preventDefault(); addBatchFiles(event.dataTransfer.files); }
-  function referenceDrop(kind: "main" | "reference", event: DragEvent<HTMLDivElement>) { event.preventDefault(); setReferenceFile(kind, event.dataTransfer.files[0]); }
+  function singleDrop(event: DragEvent<HTMLDivElement>) { event.preventDefault(); if (!isProcessing) setSingleFileSafe(event.dataTransfer.files[0]); }
+  function batchDrop(event: DragEvent<HTMLDivElement>) { event.preventDefault(); if (!isProcessing) addBatchFiles(event.dataTransfer.files); }
+  function referenceDrop(kind: "main" | "reference", event: DragEvent<HTMLDivElement>) { event.preventDefault(); if (!isProcessing) setReferenceFile(kind, event.dataTransfer.files[0]); }
+
+  function openViewer(urls: string[], index: number) {
+    setViewerUrls(urls);
+    setViewerIndex(index);
+  }
+
+  function moveViewer(direction: -1 | 1) {
+    setViewerIndex((current) => (current + direction + viewerUrls.length) % viewerUrls.length);
+  }
+
+  useEffect(() => {
+    if (!viewerUrls.length) return;
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setViewerUrls([]);
+      if (event.key === "ArrowLeft") setViewerIndex((current) => (current - 1 + viewerUrls.length) % viewerUrls.length);
+      if (event.key === "ArrowRight") setViewerIndex((current) => (current + 1) % viewerUrls.length);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [viewerUrls.length]);
 
   const activeResult = mode === "single" ? singleResult : mode === "reference" ? referenceResult : "";
 
@@ -434,19 +491,19 @@ export default function Editor() {
 
     <section className="hero" id="top"><div className="eyebrow"><span>✦</span> AI PHOTO EDITOR</div><h1>Edit any photo.<br /><em>Just describe it.</em></h1><p>Single edits, batch transformations, and reference-guided creations—powered by V-Editor.</p><div className="heroBadges"><div className="unlimited"><span>∞</span><div><strong>Unlimited trials</strong><small>Explore freely during early access</small></div></div><div className="generatedCount"><strong>{totalGenerated === null ? "—" : totalGenerated.toLocaleString()}</strong><span>images generated</span></div></div></section>
 
-    <section className="studio studioMulti" aria-label="AI photo editor">
+    <section className={`studio studioMulti ${isProcessing ? "processing" : ""}`} aria-label="AI photo editor">
       <div className="modeTabs" role="tablist" aria-label="Editing modes">
-        <button type="button" className={mode === "single" ? "active" : ""} onClick={() => { setMode("single"); setOutputTab("result"); }}><b>Single</b><small>1 image + prompt</small></button>
-        <button type="button" className={mode === "batch" ? "active" : ""} onClick={() => { setMode("batch"); setOutputTab("result"); }}><b>Batch</b><small>Up to 10 images</small></button>
-        <button type="button" className={mode === "reference" ? "active" : ""} onClick={() => { setMode("reference"); setOutputTab("result"); }}><b>Reference</b><small>Main + reference</small></button>
+        <button type="button" disabled={isProcessing} className={mode === "single" ? "active" : ""} onClick={() => { setMode("single"); setOutputTab("result"); }}><b>Single</b><small>1 image + prompt</small></button>
+        <button type="button" disabled={isProcessing} className={mode === "batch" ? "active" : ""} onClick={() => { setMode("batch"); setOutputTab("result"); }}><b>Batch</b><small>Up to 10 images</small></button>
+        <button type="button" disabled={isProcessing} className={mode === "reference" ? "active" : ""} onClick={() => { setMode("reference"); setOutputTab("result"); }}><b>Reference</b><small>Main + reference</small></button>
       </div>
 
       {mode === "single" && <>
         <div className="studioTop"><div><span className="step">01</span><h2>Single image edit</h2></div><span className="privacy">◆ Private by design</span></div>
         <div className="workspace">
-          <div className={`dropzone ${singlePreview ? "hasImage" : ""}`} onClick={() => singleInputRef.current?.click()} onDrop={singleDrop} onDragOver={(e) => e.preventDefault()} role="button" tabIndex={0} onKeyDown={(e) => e.key === "Enter" && singleInputRef.current?.click()}>
-            <input ref={singleInputRef} type="file" accept="image/png,image/jpeg,image/webp" hidden onChange={(e: ChangeEvent<HTMLInputElement>) => setSingleFileSafe(e.target.files?.[0])} />
-            {singlePreview ? <><img src={singlePreview} alt="Selected preview" /><button type="button" className="replace" onClick={(e) => { e.stopPropagation(); singleInputRef.current?.click(); }}>Replace image</button></> : <UploadEmpty title="Drop an image here" subtitle="or click to browse · PNG, JPG or WEBP · max 12 MB" />}
+          <div className={`dropzone ${singlePreview ? "hasImage" : ""} ${isProcessing ? "locked" : ""}`} onClick={() => !isProcessing && singleInputRef.current?.click()} onDrop={singleDrop} onDragOver={(e) => e.preventDefault()} role="button" tabIndex={0} onKeyDown={(e) => e.key === "Enter" && !isProcessing && singleInputRef.current?.click()}>
+            <input ref={singleInputRef} disabled={isProcessing} type="file" accept="image/png,image/jpeg,image/webp" hidden onChange={(e: ChangeEvent<HTMLInputElement>) => setSingleFileSafe(e.target.files?.[0])} />
+            {singlePreview ? <><img src={singlePreview} alt="Selected preview" />{!isProcessing && <button type="button" className="replace" onClick={(e) => { e.stopPropagation(); singleInputRef.current?.click(); }}>Replace image</button>}</> : <UploadEmpty title="Drop an image here" subtitle="or click to browse · PNG, JPG or WEBP · max 12 MB" />}
           </div>
           <div className="controls"><div className="controlHeading"><span className="step">02</span><h2>Describe your edit</h2></div><label className="promptLabel" htmlFor="single-prompt">YOUR PROMPT</label><textarea id="single-prompt" value={singlePrompt} onChange={(e) => setSinglePrompt(e.target.value)} placeholder="Make the scene look like golden hour, keep the person unchanged…" maxLength={700} /><div className="promptMeta"><button type="button" onClick={() => setSinglePrompt("Replace the background with a warm, cinematic sunset while keeping the subject unchanged.")}>✦ Try an example</button><span>{singlePrompt.length}/700</span></div><RatioPicker value={singleRatio} onChange={setSingleRatio} /><PreserveControls preserveFace={preserveFace} preservePose={preservePose} onFace={setPreserveFace} onPose={setPreservePose} /><ProgressBar progress={singleProgress} /><button type="button" className="generate" disabled={!singleFile || !singlePrompt.trim() || singleBusy} onClick={generateSingle}>{singleBusy ? <><span className="spinner" /> Working…</> : <>Generate edit <span>→</span></>}</button>{singleMessage && <p className="error">{singleMessage}</p>}<p className="fineprint">Same Face and Same Pose are prompt-level preservation locks; exact model output can still vary.</p></div>
         </div>
@@ -456,8 +513,8 @@ export default function Editor() {
         <div className="studioTop"><div><span className="step">01</span><h2>Batch edit · {batchItems.length}/{MAX_BATCH}</h2></div><span className="privacy">◆ One prompt, separate generations</span></div>
         <div className="workspace batchWorkspace">
           <div className="batchPane">
-            <div className="batchToolbar"><strong>Selected images</strong><div>{batchItems.length > 0 && <button type="button" onClick={clearBatch} disabled={batchBusy}>Clear all</button>}<button type="button" onClick={() => batchInputRef.current?.click()} disabled={batchBusy || batchItems.length >= MAX_BATCH}>+ Add images</button></div></div>
-            <input ref={batchInputRef} type="file" multiple accept="image/png,image/jpeg,image/webp" hidden onChange={(e: ChangeEvent<HTMLInputElement>) => { if (e.target.files) addBatchFiles(e.target.files); e.target.value = ""; }} />
+            <div className="batchToolbar"><strong>Selected images</strong><div>{batchItems.length > 0 && <button type="button" onClick={clearBatch} disabled={isProcessing}>Clear all</button>}<button type="button" onClick={() => batchInputRef.current?.click()} disabled={isProcessing || batchItems.length >= MAX_BATCH}>+ Add images</button></div></div>
+            <input ref={batchInputRef} disabled={isProcessing} type="file" multiple accept="image/png,image/jpeg,image/webp" hidden onChange={(e: ChangeEvent<HTMLInputElement>) => { if (e.target.files) addBatchFiles(e.target.files); e.target.value = ""; }} />
             {batchItems.length === 0 ? <div className="dropzone batchDropzone" onClick={() => batchInputRef.current?.click()} onDrop={batchDrop} onDragOver={(e) => e.preventDefault()} role="button" tabIndex={0}><UploadEmpty title="Drop up to 10 images" subtitle="One shared prompt will be applied to every image" button="Choose images" /></div> : <div className="batchGrid" onDrop={batchDrop} onDragOver={(e) => e.preventDefault()}>{batchItems.map((item, index) => <article key={item.id} className={`batchCard ${item.status}`}><div className="batchThumb"><img src={item.preview} alt={`Batch source ${index + 1}`} />{!batchBusy && <button type="button" onClick={() => removeBatchItem(item.id)} aria-label={`Remove image ${index + 1}`}>×</button>}</div><div className="batchCardMeta"><span>{index + 1}</span><div><strong>{item.status === "done" ? "Done" : item.status === "failed" ? "Failed" : item.label}</strong><div className="miniProgress"><i style={{ width: `${item.progress}%` }} /></div></div><b>{Math.round(item.progress)}%</b></div>{item.result && <div className="batchResultActions"><button type="button" onClick={() => downloadOne(item.result!, index + 1)}>↓ Download</button><a href={item.result} target="_blank" rel="noopener noreferrer">Open ↗</a></div>}</article>)}</div>}
           </div>
           <div className="controls"><div className="controlHeading"><span className="step">02</span><h2>Shared batch prompt</h2></div><label className="promptLabel" htmlFor="batch-prompt">PROMPT FOR ALL IMAGES</label><textarea id="batch-prompt" value={batchPrompt} onChange={(e) => setBatchPrompt(e.target.value)} placeholder="Apply the same edit to every selected image…" maxLength={700} /><div className="promptMeta"><button type="button" onClick={() => setBatchPrompt("Give every image a clean cinematic color grade while preserving the subject and composition.")}>✦ Try an example</button><span>{batchPrompt.length}/700</span></div><RatioPicker value={batchRatio} onChange={setBatchRatio} /><PreserveControls preserveFace={preserveFace} preservePose={preservePose} onFace={setPreserveFace} onPose={setPreservePose} /><ProgressBar progress={batchProgress} /><button type="button" className="generate" disabled={!batchItems.length || !batchPrompt.trim() || batchBusy} onClick={generateBatch}>{batchBusy ? <><span className="spinner" /> Processing {batchDone}/{batchItems.length}</> : <>Generate {batchItems.length || ""} image{batchItems.length === 1 ? "" : "s"} <span>→</span></>}</button>{batchMessage && <p className="error">{batchMessage}</p>}<p className="fineprint">Each image is a separate V-Editor request and paid use.</p></div>
@@ -476,12 +533,52 @@ export default function Editor() {
       </>}
 
       <div className="output">
-        <div className="tabs"><div><button type="button" className={outputTab === "result" ? "active" : ""} onClick={() => setOutputTab("result")}>Result</button><button type="button" className={outputTab === "history" ? "active" : ""} onClick={() => setOutputTab("history")}>24h History <span>{history.length}</span></button></div>{history.length > 0 && <button type="button" className="clearHistory" onClick={clearHistory}>Clear history</button>}</div>
+        <div className="tabs"><div><button type="button" className={outputTab === "result" ? "active" : ""} onClick={() => setOutputTab("result")}>Result</button><button type="button" className={outputTab === "history" ? "active" : ""} onClick={() => setOutputTab("history")}>24h History <span>{history.length}</span></button></div>{history.length > 0 && <button type="button" className="clearHistory" disabled={isProcessing} onClick={clearHistory}>Clear history</button>}</div>
+        <ProgressBar progress={downloadProgress} />
         {outputTab === "history" && history.length > 0 && <div className="downloadBar"><div><button type="button" className={`selectToggle ${selecting ? "active" : ""}`} onClick={() => { setSelecting(!selecting); setSelected([]); setDownloadMenu(false); }}>{selecting ? "Done" : "Select"}</button>{selecting && <button type="button" className="selectAll" onClick={() => setSelected(selected.length === history.length ? [] : history.map((item) => item.url))}>{selected.length === history.length ? "Clear all" : "Select all"}</button>}</div>{selecting && <div className="downloadWrap"><button type="button" className="downloadSelected" disabled={!selected.length || downloading} onClick={() => setDownloadMenu(!downloadMenu)}>{downloading ? "Preparing…" : `Download ${selected.length || ""}`} <span>⌄</span></button>{downloadMenu && <div className="downloadMenu"><button type="button" onClick={() => void downloadSelected("zip")}><b>ZIP archive</b><small>One file with all selected images</small></button><button type="button" onClick={() => void downloadSelected("separate")}><b>Separate files</b><small>Trigger each selected download separately</small></button></div>}</div>}</div>}
 
-        {outputTab === "result" ? mode === "batch" ? <div className="batchOutput">{batchResults.length ? <><div className="batchOutputHead"><div><strong>{batchResults.length} result{batchResults.length === 1 ? "" : "s"} ready</strong><small>{batchFailed ? `${batchFailed} failed` : "Batch completed"}</small></div><div><button type="button" disabled={batchDownloading} onClick={() => void downloadBatch("zip")}>{batchDownloading ? "Preparing…" : "↓ Download ZIP"}</button><button type="button" disabled={batchDownloading} onClick={() => void downloadBatch("separate")}>Separate files</button></div></div><div className="batchOutputGrid">{batchItems.filter((item) => item.result).map((item, index) => <article key={item.id}><img src={item.result} alt={`Batch result ${index + 1}`} /><div><button type="button" onClick={() => downloadOne(item.result!, index + 1)}>↓ Download</button><a href={item.result} target="_blank" rel="noopener noreferrer">Open full size ↗</a></div></article>)}</div></> : <div className="emptyResult"><span>✦</span><h3>Your batch results will appear here</h3><p>Add up to 10 images, use one prompt, and generate them together.</p></div>}</div> : <div className="resultArea">{activeResult ? <div className="resultCard"><img src={activeResult} alt="AI generated edit" /><div className="resultActions"><button type="button" onClick={() => downloadOne(activeResult)}>↓ Download</button><a href={activeResult} target="_blank" rel="noopener noreferrer">Open full size ↗</a></div></div> : <div className="emptyResult"><span>✦</span><h3>Your creation will appear here</h3><p>{mode === "reference" ? "Add a main image, reference image, and prompt." : "Upload an image, write a prompt, and let Pixora do the rest."}</p></div>}</div> : <div className={`historyGrid ${selecting ? "selecting" : ""}`}>{history.length ? history.map((item, index) => <article key={item.createdAt} className={selected.includes(item.url) ? "selected" : ""} onClick={() => selecting ? toggleSelection(item.url) : (setSingleResult(item.url), setMode("single"), setOutputTab("result"))} role="button" tabIndex={0} onKeyDown={(event) => event.key === "Enter" && (selecting ? toggleSelection(item.url) : (setSingleResult(item.url), setMode("single"), setOutputTab("result")))}>{selecting && <span className="check">{selected.includes(item.url) ? "✓" : ""}</span>}<img src={item.url} alt={item.prompt} /><div className="historyCaption"><span>{item.prompt}</span>{!selecting && <button type="button" aria-label="Download image" onClick={(event) => { event.stopPropagation(); downloadOne(item.url, index + 1); }}>↓</button>}</div></article>) : <div className="emptyResult"><h3>No edits yet</h3><p>Edits stay on this device for 24 hours.</p></div>}</div>}
+        {outputTab === "result" ? mode === "batch" ? <div className="batchOutput">
+          {batchResults.length ? <>
+            <div className="batchOutputHead"><div><strong>{batchResults.length} result{batchResults.length === 1 ? "" : "s"} ready</strong><small>{batchFailed ? `${batchFailed} failed` : "Batch completed"}</small></div><div><button type="button" disabled={batchDownloading} onClick={() => void downloadBatch("zip")}>{batchDownloading ? "Preparing…" : "↓ Download ZIP"}</button><button type="button" disabled={batchDownloading} onClick={() => void downloadBatch("separate")}>Separate files</button></div></div>
+            <div className="batchOutputGrid">{batchItems.filter((item) => item.result).map((item, index) => <article key={item.id}>
+              <div className={`downloadVisual ${downloadedUrls.includes(item.result!) ? "downloaded" : ""}`} onClick={() => openViewer(batchResults, index)} role="button" tabIndex={0}><img src={item.result} alt={`Batch result ${index + 1}`} /><span className="downloadCheck">✓<small>Downloaded</small></span></div>
+              <div><button type="button" onClick={() => void downloadOne(item.result!, index + 1)}>↓ Download</button><a href={item.result} target="_blank" rel="noopener noreferrer">Open full size ↗</a></div>
+            </article>)}</div>
+          </> : <div className="emptyResult"><span>✦</span><h3>Your batch results will appear here</h3><p>Add up to 10 images, use one prompt, and generate them together.</p></div>}
+        </div> : <div className="resultArea">
+          {activeResult ? <div className="resultCard">
+            <div className={`downloadVisual ${downloadedUrls.includes(activeResult) ? "downloaded" : ""}`} onClick={() => {
+              const index = history.findIndex((item) => item.url === activeResult);
+              openViewer(index >= 0 ? history.map((item) => item.url) : [activeResult], index >= 0 ? index : 0);
+            }} role="button" tabIndex={0}><img src={activeResult} alt="AI generated edit" /><span className="downloadCheck">✓<small>Downloaded</small></span></div>
+            <div className="resultActions"><button type="button" onClick={() => void downloadOne(activeResult)}>↓ Download</button><a href={activeResult} target="_blank" rel="noopener noreferrer">Open full size ↗</a></div>
+          </div> : <div className="emptyResult"><span>✦</span><h3>Your creation will appear here</h3><p>{mode === "reference" ? "Add a main image, reference image, and prompt." : "Upload an image, write a prompt, and let Pixora do the rest."}</p></div>}
+        </div> : <div className={`historyGrid ${selecting ? "selecting" : ""}`}>
+          {history.length ? history.map((item, index) => <article key={item.createdAt} className={selected.includes(item.url) ? "selected" : ""} onClick={() => selecting ? toggleSelection(item.url) : openViewer(history.map((entry) => entry.url), index)} role="button" tabIndex={0} onKeyDown={(event) => event.key === "Enter" && (selecting ? toggleSelection(item.url) : openViewer(history.map((entry) => entry.url), index))}>
+            {selecting && <span className="check">{selected.includes(item.url) ? "✓" : ""}</span>}
+            <div className={`downloadVisual ${downloadedUrls.includes(item.url) ? "downloaded" : ""}`}><img src={item.url} alt={item.prompt} /><span className="downloadCheck">✓<small>Downloaded</small></span></div>
+            <div className="historyCaption"><span>{item.prompt}</span>{!selecting && <button type="button" aria-label="Download image" onClick={(event) => { event.stopPropagation(); void downloadOne(item.url, index + 1); }}>↓</button>}</div>
+          </article>) : <div className="emptyResult"><h3>No edits yet</h3><p>Edits stay on this device for 24 hours.</p></div>}
+        </div>}
       </div>
     </section>
+
+    {viewerUrls.length > 0 && <div className="imageViewer" role="dialog" aria-modal="true" aria-label="Image preview" onClick={() => setViewerUrls([])}>
+      <button type="button" className="viewerClose" onClick={() => setViewerUrls([])} aria-label="Close preview">×</button>
+      {viewerUrls.length > 1 && <button type="button" className="viewerPrevious" onClick={(event) => { event.stopPropagation(); moveViewer(-1); }} aria-label="Previous image">‹</button>}
+      <div className="viewerCanvas" onClick={(event) => event.stopPropagation()} onTouchStart={(event) => { swipeStart.current = event.touches[0].clientX; }} onTouchEnd={(event) => {
+        if (swipeStart.current === null) return;
+        const distance = event.changedTouches[0].clientX - swipeStart.current;
+        if (Math.abs(distance) > 45 && viewerUrls.length > 1) moveViewer(distance > 0 ? -1 : 1);
+        swipeStart.current = null;
+      }}>
+        <img src={viewerUrls[viewerIndex]} alt={`Preview ${viewerIndex + 1} of ${viewerUrls.length}`} />
+        <span>{viewerIndex + 1} / {viewerUrls.length}</span>
+      </div>
+      {viewerUrls.length > 1 && <button type="button" className="viewerNext" onClick={(event) => { event.stopPropagation(); moveViewer(1); }} aria-label="Next image">›</button>}
+    </div>}
+
+    {downloadNoticeUrl && <div className="downloadNotice" role="status"><img src={downloadNoticeUrl} alt="" /><div><b>✓</b><span>Downloaded</span></div></div>}
 
     <section className="how" id="how"><p className="eyebrow">THREE WAYS TO CREATE</p><h2>One editor.<br />Three flexible workflows.</h2><div className="howGrid"><article><span>01</span><h3>Single</h3><p>Edit one image with a direct natural-language instruction.</p></article><article><span>02</span><h3>Batch</h3><p>Apply one shared prompt to as many as ten images in one run.</p></article><article><span>03</span><h3>Reference</h3><p>Guide a main image with a second visual reference plus your prompt.</p></article></div></section>
     <footer><a className="brand" href="#top"><span className="brandMark">P</span><span>Pixora</span></a><p>AI editing, without the complexity.</p><span>Powered by VModel V-Editor</span></footer>
