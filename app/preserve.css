@@ -1,0 +1,15 @@
+.preservePanel{margin-top:14px;padding:13px;border:1px solid #d2cfc4;border-radius:15px;background:linear-gradient(145deg,#fff,#f2f1eb)}
+.preserveHead span{display:block;color:#747970;font-size:10px;font-weight:800;letter-spacing:.12em}
+.preserveHead small{display:block;margin-top:3px;color:#999b95;font-size:9px}
+.preserveOptions{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:11px}
+.preserveOptions label{min-width:0;display:flex;align-items:center;gap:9px;padding:10px;border:1px solid #ddd9ce;border-radius:11px;background:#fff;cursor:pointer;transition:.18s ease}
+.preserveOptions label.active{border-color:#829a48;background:#f5f9e9;box-shadow:0 0 0 2px rgba(200,240,79,.16)}
+.preserveOptions label>span{min-width:0;flex:1;display:flex;flex-direction:column}
+.preserveOptions b{color:#3c4139;font-size:10px}
+.preserveOptions small{margin-top:2px;color:#8b8f87;font-size:8px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.preserveOptions input{position:absolute;opacity:0;pointer-events:none}
+.preserveOptions i{width:32px;height:18px;position:relative;flex:0 0 auto;border-radius:99px;background:#d5d5cf;transition:.18s ease}
+.preserveOptions i:after{content:"";width:14px;height:14px;position:absolute;left:2px;top:2px;border-radius:50%;background:#fff;box-shadow:0 1px 4px rgba(0,0,0,.2);transition:.18s ease}
+.preserveOptions label.active i{background:var(--green)}
+.preserveOptions label.active i:after{transform:translateX(14px);background:var(--lime)}
+@media(max-width:480px){.preserveOptions{grid-template-columns:1fr}.preservePanel{padding:11px}}
