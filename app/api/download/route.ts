@@ -1,5 +1,6 @@
 const ALLOWED_HOSTS = [
   "vmodel.ai",
+  "vmimgs.com",
   "replicate.delivery",
   "fal.media",
   "storage.googleapis.com",
