@@ -4,7 +4,7 @@ import { ChangeEvent, DragEvent, useEffect, useMemo, useRef, useState } from "re
 import { upload } from "@vercel/blob/client";
 
 const ratios = ["default", "1:1", "3:2", "2:3", "9:16", "16:9", "3:4", "4:3"];
-const MAX_BATCH = 10;
+const MAX_BATCH = 50;
 const MAX_FILE_BYTES = 12 * 1024 * 1024;
 
 type Mode = "single" | "batch" | "reference";
@@ -241,12 +241,12 @@ export default function Editor() {
     const all = Array.from(list);
     const incoming = all.filter((file) => ["image/png", "image/jpeg", "image/webp"].includes(file.type) && file.size <= MAX_FILE_BYTES);
     const remaining = MAX_BATCH - batchItems.length;
-    if (remaining <= 0) { setBatchMessage("Maximum 10 images per batch."); return; }
+    if (remaining <= 0) { setBatchMessage(`Maximum ${MAX_BATCH} images per batch.`); return; }
     const accepted = incoming.slice(0, remaining).map((file) => ({
       id: crypto.randomUUID(), file, preview: URL.createObjectURL(file), progress: 0, label: "Ready", status: "ready" as BatchStatus,
     }));
     setBatchItems((current) => [...current, ...accepted]);
-    if (incoming.length > remaining) setBatchMessage(`Only the first ${remaining} image${remaining === 1 ? "" : "s"} were added. Maximum is 10.`);
+    if (incoming.length > remaining) setBatchMessage(`Only the first ${remaining} image${remaining === 1 ? "" : "s"} were added. Maximum is ${MAX_BATCH}.`);
     else if (accepted.length !== all.length) setBatchMessage("Some files were skipped. Use PNG, JPG, or WEBP up to 12 MB each.");
     else setBatchMessage("");
   }
@@ -336,7 +336,7 @@ export default function Editor() {
 
   async function generateBatch() {
     if (!batchItems.length || !batchPrompt.trim()) { setBatchMessage("Add at least one image and enter a shared prompt."); return; }
-    if (batchItems.length > MAX_BATCH) { setBatchMessage("Maximum 10 images per batch."); return; }
+    if (batchItems.length > MAX_BATCH) { setBatchMessage(`Maximum ${MAX_BATCH} images per batch.`); return; }
     setBatchBusy(true); setBatchMessage(""); setOutputTab("result");
     setBatchItems((current) => current.map((item) => ({ ...item, uploadedUrl: undefined, taskId: undefined, result: undefined, error: undefined, progress: 1, label: "Starting upload…", status: "uploading" })));
     try {
@@ -571,7 +571,7 @@ export default function Editor() {
     <section className={`studio studioMulti ${isProcessing ? "processing" : ""}`} aria-label="AI photo editor">
       <div className="modeTabs" role="tablist" aria-label="Editing modes">
         <button type="button" disabled={isProcessing} className={mode === "single" ? "active" : ""} onClick={() => { setMode("single"); setOutputTab("result"); }}><b>Single</b><small>1 image + prompt</small></button>
-        <button type="button" disabled={isProcessing} className={mode === "batch" ? "active" : ""} onClick={() => { setMode("batch"); setOutputTab("result"); }}><b>Batch</b><small>Up to 10 images</small></button>
+        <button type="button" disabled={isProcessing} className={mode === "batch" ? "active" : ""} onClick={() => { setMode("batch"); setOutputTab("result"); }}><b>Batch</b><small>Up to {MAX_BATCH} images</small></button>
         <button type="button" disabled={isProcessing} className={mode === "reference" ? "active" : ""} onClick={() => { setMode("reference"); setOutputTab("result"); }}><b>Reference</b><small>Main + reference</small></button>
       </div>
 
@@ -592,7 +592,7 @@ export default function Editor() {
           <div className="batchPane">
             <div className="batchToolbar"><strong>Selected images</strong><div>{batchItems.length > 0 && <button type="button" onClick={clearBatch} disabled={isProcessing}>Clear all</button>}<button type="button" onClick={() => batchInputRef.current?.click()} disabled={isProcessing || batchItems.length >= MAX_BATCH}>+ Add images</button></div></div>
             <input ref={batchInputRef} disabled={isProcessing} type="file" multiple accept="image/png,image/jpeg,image/webp" hidden onChange={(e: ChangeEvent<HTMLInputElement>) => { if (e.target.files) addBatchFiles(e.target.files); e.target.value = ""; }} />
-            {batchItems.length === 0 ? <div className="dropzone batchDropzone" onClick={() => batchInputRef.current?.click()} onDrop={batchDrop} onDragOver={(e) => e.preventDefault()} role="button" tabIndex={0}><UploadEmpty title="Drop up to 10 images" subtitle="One shared prompt will be applied to every image" button="Choose images" /></div> : <div className="batchGrid" onDrop={batchDrop} onDragOver={(e) => e.preventDefault()}>{batchItems.map((item, index) => <article key={item.id} className={`batchCard ${item.status}`}><div className="batchThumb"><img src={item.preview} alt={`Batch source ${index + 1}`} />{!batchBusy && <button type="button" onClick={() => removeBatchItem(item.id)} aria-label={`Remove image ${index + 1}`}>×</button>}</div><div className="batchCardMeta"><span>{index + 1}</span><div><strong>{item.status === "done" ? "Done" : item.status === "failed" ? "Failed" : item.label}</strong><div className="miniProgress"><i style={{ width: `${item.progress}%` }} /></div></div><b>{Math.round(item.progress)}%</b></div>{item.result && <div className="batchResultActions"><button type="button" onClick={() => downloadOne(item.result!, index + 1)}>↓ Download</button><a href={item.result} target="_blank" rel="noopener noreferrer">Open ↗</a></div>}</article>)}</div>}
+            {batchItems.length === 0 ? <div className="dropzone batchDropzone" onClick={() => batchInputRef.current?.click()} onDrop={batchDrop} onDragOver={(e) => e.preventDefault()} role="button" tabIndex={0}><UploadEmpty title={`Drop up to ${MAX_BATCH} images`} subtitle="One shared prompt will be applied to every image" button="Choose images" /></div> : <div className="batchGrid" onDrop={batchDrop} onDragOver={(e) => e.preventDefault()}>{batchItems.map((item, index) => <article key={item.id} className={`batchCard ${item.status}`}><div className="batchThumb"><img src={item.preview} alt={`Batch source ${index + 1}`} />{!batchBusy && <button type="button" onClick={() => removeBatchItem(item.id)} aria-label={`Remove image ${index + 1}`}>×</button>}</div><div className="batchCardMeta"><span>{index + 1}</span><div><strong>{item.status === "done" ? "Done" : item.status === "failed" ? "Failed" : item.label}</strong><div className="miniProgress"><i style={{ width: `${item.progress}%` }} /></div></div><b>{Math.round(item.progress)}%</b></div>{item.result && <div className="batchResultActions"><button type="button" onClick={() => downloadOne(item.result!, index + 1)}>↓ Download</button><a href={item.result} target="_blank" rel="noopener noreferrer">Open ↗</a></div>}</article>)}</div>}
           </div>
           <div className="controls"><div className="controlHeading"><span className="step">02</span><h2>Shared batch prompt</h2></div><label className="promptLabel" htmlFor="batch-prompt">PROMPT FOR ALL IMAGES</label><textarea id="batch-prompt" value={batchPrompt} onChange={(e) => setBatchPrompt(e.target.value)} placeholder="Apply the same edit to every selected image…" maxLength={700} /><div className="promptMeta"><button type="button" onClick={() => setBatchPrompt("Give every image a clean cinematic color grade while preserving the subject and composition.")}>✦ Try an example</button><span>{batchPrompt.length}/700</span></div><RatioPicker value={batchRatio} onChange={setBatchRatio} /><PreserveControls preserveFace={preserveFace} preservePose={preservePose} onFace={setPreserveFace} onPose={setPreservePose} /><ProgressBar progress={batchProgress} /><button type="button" className="generate" disabled={!batchItems.length || !batchPrompt.trim() || batchBusy} onClick={generateBatch}>{batchBusy ? <><span className="spinner" /> Processing {batchDone}/{batchItems.length}</> : <>Generate {batchItems.length || ""} image{batchItems.length === 1 ? "" : "s"} <span>→</span></>}</button>{batchMessage && <p className="error">{batchMessage}</p>}<p className="fineprint">Each image is a separate V-Editor request and paid use.</p></div>
         </div>
@@ -621,7 +621,7 @@ export default function Editor() {
               <div className={`downloadVisual ${downloadedUrls.includes(item.result!) ? "downloaded" : ""}`} onClick={() => openViewer(batchResults, index)} role="button" tabIndex={0}><img src={item.result} alt={`Batch result ${index + 1}`} /><span className="downloadCheck">✓<small>Downloaded</small></span></div>
               <div><button type="button" onClick={() => void downloadOne(item.result!, index + 1)}>↓ Download</button><a href={item.result} target="_blank" rel="noopener noreferrer">Open full size ↗</a></div>
             </article>)}</div>
-          </> : <div className="emptyResult"><span>✦</span><h3>Your batch results will appear here</h3><p>Add up to 10 images, use one prompt, and generate them together.</p></div>}
+          </> : <div className="emptyResult"><span>✦</span><h3>Your batch results will appear here</h3><p>Add up to {MAX_BATCH} images, use one prompt, and generate them together.</p></div>}
         </div> : <div className="resultArea">
           {activeResult ? <div className="resultCard">
             <div className={`downloadVisual ${downloadedUrls.includes(activeResult) ? "downloaded" : ""}`} onClick={() => {
@@ -665,7 +665,7 @@ export default function Editor() {
       undoSwipeStart.current = null;
     }}><span>Image removed</span><button type="button" className="undoAction" onClick={undoHistoryRemoval}>Undo</button><button type="button" className="undoClose" onClick={dismissUndo} aria-label="Dismiss undo message">×</button></div>}
 
-    <section className="how" id="how"><p className="eyebrow">THREE WAYS TO CREATE</p><h2>One editor.<br />Three flexible workflows.</h2><div className="howGrid"><article><span>01</span><h3>Single</h3><p>Edit one image with a direct natural-language instruction.</p></article><article><span>02</span><h3>Batch</h3><p>Apply one shared prompt to as many as ten images in one run.</p></article><article><span>03</span><h3>Reference</h3><p>Guide a main image with a second visual reference plus your prompt.</p></article></div></section>
+    <section className="how" id="how"><p className="eyebrow">THREE WAYS TO CREATE</p><h2>One editor.<br />Three flexible workflows.</h2><div className="howGrid"><article><span>01</span><h3>Single</h3><p>Edit one image with a direct natural-language instruction.</p></article><article><span>02</span><h3>Batch</h3><p>Apply one shared prompt to as many as {MAX_BATCH} images in one run.</p></article><article><span>03</span><h3>Reference</h3><p>Guide a main image with a second visual reference plus your prompt.</p></article></div></section>
     <footer><a className="brand" href="#top"><span className="brandMark">P</span><span>Pixora</span></a><p>AI editing, without the complexity.</p><span>Powered by VModel V-Editor</span></footer>
   </main>;
 }
