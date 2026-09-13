@@ -1,7 +1,9 @@
+import { getVModelToken } from "../../../lib/vmodel-token";
+
 const VERSION = "b7eae3b3e3091ec6ce78162ccf39fea6d1fa9aaf41ec1cac375441d1cdc3997f";
 
 export async function POST(request: Request) {
-  const token = process.env.VMODEL_API_TOKEN;
+  const token = await getVModelToken();
   if (!token) return Response.json({ error: "VModel API is not configured." }, { status: 503 });
   const body = await request.json() as { imageUrl?: string; prompt?: string; aspectRatio?: string };
   if (!body.imageUrl?.startsWith("https://") || !body.prompt?.trim()) return Response.json({ error: "Image and prompt are required." }, { status: 400 });

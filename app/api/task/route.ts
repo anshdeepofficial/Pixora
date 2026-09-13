@@ -1,7 +1,8 @@
 import { put } from "@vercel/blob";
+import { getVModelToken } from "../../../lib/vmodel-token";
 
 export async function GET(request: Request) {
-  const token = process.env.VMODEL_API_TOKEN;
+  const token = await getVModelToken();
   if (!token) return Response.json({ error: "VModel API is not configured." }, { status: 503 });
   const id = new URL(request.url).searchParams.get("id");
   if (!id || !/^[a-zA-Z0-9_-]{6,80}$/.test(id)) return Response.json({ error: "Invalid task ID." }, { status: 400 });
