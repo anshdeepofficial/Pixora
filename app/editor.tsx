@@ -137,6 +137,19 @@ export default function Editor() {
     fetch("/api/stats", { cache: "no-store" }).then((response) => response.ok ? response.json() : Promise.reject()).then((data: { totalGenerated?: number }) => {
       if (typeof data.totalGenerated === "number") setTotalGenerated(data.totalGenerated);
     }).catch(() => undefined);
+    fetch("/api/recovery-history", { cache: "no-store" })
+      .then((response) => response.ok ? response.json() : Promise.reject())
+      .then((data: { history?: HistoryItem[] }) => {
+        if (!Array.isArray(data.history)) return;
+        setHistory((current) => {
+          const combined = [...data.history!, ...current];
+          const unique = Array.from(new Map(combined.map((item) => [item.url, item])).values())
+            .sort((left, right) => new Date(right.createdAt).getTime() - new Date(left.createdAt).getTime());
+          localStorage.setItem("pixora-history", JSON.stringify(unique));
+          return unique;
+        });
+      })
+      .catch(() => undefined);
     return () => window.clearInterval(timer);
   }, []);
 
