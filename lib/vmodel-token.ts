@@ -39,6 +39,14 @@ export async function getVModelToken() {
   return process.env.VMODEL_API_TOKEN || null;
 }
 
+export function vModelTokenFingerprint(token: string) {
+  return createHash("sha256").update(token).digest("hex").slice(0, 20);
+}
+
+export async function hasVModelTokenOverride() {
+  return Boolean(await overrideToken());
+}
+
 export async function getVModelTokenInfo() {
   const saved = await overrideToken();
   const token = saved || process.env.VMODEL_API_TOKEN || "";

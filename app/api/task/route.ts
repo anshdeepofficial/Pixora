@@ -1,5 +1,5 @@
 import { put } from "@vercel/blob";
-import { getVModelToken } from "../../../lib/vmodel-token";
+import { getVModelToken, vModelTokenFingerprint } from "../../../lib/vmodel-token";
 
 export async function GET(request: Request) {
   const token = await getVModelToken();
@@ -13,7 +13,7 @@ export async function GET(request: Request) {
 
   if (data.result.status === "succeeded" && data.result.output?.[0]) {
     try {
-      await put(`pixora-generations/${id}.json`, JSON.stringify({
+      await put(`pixora-generations/${vModelTokenFingerprint(token)}/${id}.json`, JSON.stringify({
         taskId: id,
         output: data.result.output[0],
         completedAt: new Date().toISOString(),
