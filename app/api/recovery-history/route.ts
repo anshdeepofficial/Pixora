@@ -6,6 +6,8 @@ type RecoveredItem = {
   createdAt: string;
 };
 
+const HISTORY_VERSION = "2026-09-13T08:27:07.000Z";
+
 async function listAll(prefix: string) {
   const blobs: Awaited<ReturnType<typeof list>>["blobs"] = [];
   let cursor: string | undefined;
@@ -56,11 +58,13 @@ export async function GET() {
       }
     }
 
+    const clearedAt = new Date(HISTORY_VERSION).getTime();
     const unique = Array.from(new Map(recovered.map((item) => [item.url, item])).values())
+      .filter((item) => new Date(item.createdAt).getTime() >= clearedAt)
       .sort((left, right) => new Date(right.createdAt).getTime() - new Date(left.createdAt).getTime());
 
     return Response.json(
-      { history: unique },
+      { history: unique, historyVersion: HISTORY_VERSION },
       { headers: { "Cache-Control": "no-store, max-age=0" } },
     );
   } catch (error) {

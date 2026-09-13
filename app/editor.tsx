@@ -118,17 +118,24 @@ export default function Editor() {
   const [downloadNoticeUrl, setDownloadNoticeUrl] = useState("");
   const [viewerUrls, setViewerUrls] = useState<string[]>([]);
   const [viewerIndex, setViewerIndex] = useState(0);
+  const [pendingUndo, setPendingUndo] = useState<{ item: HistoryItem; index: number } | null>(null);
   const swipeStart = useRef<number | null>(null);
+  const undoSwipeStart = useRef<number | null>(null);
+  const undoTimerRef = useRef<number | null>(null);
 
   const isProcessing = singleBusy || batchBusy || referenceBusy;
 
   useEffect(() => {
     const prune = () => {
       const saved = localStorage.getItem("pixora-history");
+      const hiddenSaved = localStorage.getItem("pixora-history-hidden");
       const cutoff = Date.now() - 24 * 60 * 60 * 1000;
       let parsed: HistoryItem[] = [];
+      let hidden: string[] = [];
       try { parsed = saved ? JSON.parse(saved) as HistoryItem[] : []; } catch { parsed = []; }
-      const fresh = parsed.filter((item) => new Date(item.createdAt).getTime() > cutoff);
+      try { hidden = hiddenSaved ? JSON.parse(hiddenSaved) as string[] : []; } catch { hidden = []; }
+      const hiddenUrls = new Set(hidden);
+      const fresh = parsed.filter((item) => new Date(item.createdAt).getTime() > cutoff && !hiddenUrls.has(item.url));
       setHistory(fresh);
       localStorage.setItem("pixora-history", JSON.stringify(fresh));
     };
@@ -139,10 +146,20 @@ export default function Editor() {
     }).catch(() => undefined);
     fetch("/api/recovery-history", { cache: "no-store" })
       .then((response) => response.ok ? response.json() : Promise.reject())
-      .then((data: { history?: HistoryItem[] }) => {
+      .then((data: { history?: HistoryItem[]; historyVersion?: string }) => {
         if (!Array.isArray(data.history)) return;
+        const resetHistory = Boolean(data.historyVersion && localStorage.getItem("pixora-history-version") !== data.historyVersion);
+        if (data.historyVersion) localStorage.setItem("pixora-history-version", data.historyVersion);
+        if (resetHistory) {
+          localStorage.removeItem("pixora-history");
+          localStorage.removeItem("pixora-history-hidden");
+          setSelected([]);
+        }
         setHistory((current) => {
-          const combined = [...data.history!, ...current];
+          let hidden: string[] = [];
+          try { hidden = JSON.parse(localStorage.getItem("pixora-history-hidden") || "[]") as string[]; } catch { hidden = []; }
+          const hiddenUrls = new Set(hidden);
+          const combined = [...data.history!, ...(resetHistory ? [] : current)].filter((item) => !hiddenUrls.has(item.url));
           const unique = Array.from(new Map(combined.map((item) => [item.url, item])).values())
             .sort((left, right) => new Date(right.createdAt).getTime() - new Date(left.createdAt).getTime());
           localStorage.setItem("pixora-history", JSON.stringify(unique));
@@ -150,7 +167,10 @@ export default function Editor() {
         });
       })
       .catch(() => undefined);
-    return () => window.clearInterval(timer);
+    return () => {
+      window.clearInterval(timer);
+      if (undoTimerRef.current !== null) window.clearTimeout(undoTimerRef.current);
+    };
   }, []);
 
   const batchOverall = useMemo(() => batchItems.length ? Math.round(batchItems.reduce((sum, item) => sum + item.progress, 0) / batchItems.length) : 0, [batchItems]);
@@ -466,7 +486,51 @@ export default function Editor() {
 
   function clearHistory() {
     if (isProcessing) return;
+    const hidden = readHiddenHistory();
+    localStorage.setItem("pixora-history-hidden", JSON.stringify(Array.from(new Set([...hidden, ...history.map((item) => item.url)]))));
+    dismissUndo();
     localStorage.removeItem("pixora-history"); setHistory([]); setSelected([]); setSelecting(false); setDownloadMenu(false); setOutputTab("history");
+  }
+
+  function readHiddenHistory() {
+    try { return JSON.parse(localStorage.getItem("pixora-history-hidden") || "[]") as string[]; } catch { return []; }
+  }
+
+  function dismissUndo() {
+    if (undoTimerRef.current !== null) window.clearTimeout(undoTimerRef.current);
+    undoTimerRef.current = null;
+    setPendingUndo(null);
+  }
+
+  function removeHistoryItem(item: HistoryItem, index: number) {
+    if (isProcessing) return;
+    dismissUndo();
+    setHistory((current) => {
+      const next = current.filter((entry) => entry.url !== item.url);
+      localStorage.setItem("pixora-history", JSON.stringify(next));
+      return next;
+    });
+    localStorage.setItem("pixora-history-hidden", JSON.stringify(Array.from(new Set([...readHiddenHistory(), item.url]))));
+    setSelected((current) => current.filter((url) => url !== item.url));
+    setPendingUndo({ item, index });
+    undoTimerRef.current = window.setTimeout(() => {
+      setPendingUndo(null);
+      undoTimerRef.current = null;
+    }, 5000);
+  }
+
+  function undoHistoryRemoval() {
+    if (!pendingUndo) return;
+    const { item, index } = pendingUndo;
+    localStorage.setItem("pixora-history-hidden", JSON.stringify(readHiddenHistory().filter((url) => url !== item.url)));
+    setHistory((current) => {
+      const withoutItem = current.filter((entry) => entry.url !== item.url);
+      const next = [...withoutItem];
+      next.splice(Math.min(index, next.length), 0, item);
+      localStorage.setItem("pixora-history", JSON.stringify(next));
+      return next;
+    });
+    dismissUndo();
   }
 
   function toggleSelection(url: string) {
@@ -569,6 +633,7 @@ export default function Editor() {
         </div> : <div className={`historyGrid ${selecting ? "selecting" : ""}`}>
           {history.length ? history.map((item, index) => <article key={item.createdAt} className={selected.includes(item.url) ? "selected" : ""} onClick={() => selecting ? toggleSelection(item.url) : openViewer(history.map((entry) => entry.url), index)} role="button" tabIndex={0} onKeyDown={(event) => event.key === "Enter" && (selecting ? toggleSelection(item.url) : openViewer(history.map((entry) => entry.url), index))}>
             {selecting && <span className="check">{selected.includes(item.url) ? "✓" : ""}</span>}
+            {!selecting && <button type="button" className="historyDelete" disabled={isProcessing} aria-label="Remove image from history" onClick={(event) => { event.stopPropagation(); removeHistoryItem(item, index); }}>×</button>}
             <div className={`downloadVisual ${downloadedUrls.includes(item.url) ? "downloaded" : ""}`}><img src={item.url} alt={item.prompt} /><span className="downloadCheck">✓<small>Downloaded</small></span></div>
             <div className="historyCaption"><span>{item.prompt}</span>{!selecting && <button type="button" aria-label="Download image" onClick={(event) => { event.stopPropagation(); void downloadOne(item.url, index + 1); }}>↓</button>}</div>
           </article>) : <div className="emptyResult"><h3>No edits yet</h3><p>Edits stay on this device for 24 hours.</p></div>}
@@ -592,6 +657,13 @@ export default function Editor() {
     </div>}
 
     {downloadNoticeUrl && <div className="downloadNotice" role="status"><img src={downloadNoticeUrl} alt="" /><div><b>✓</b><span>Downloaded</span></div></div>}
+
+    {pendingUndo && <div className="undoToast" role="status" aria-live="polite" onTouchStart={(event) => { undoSwipeStart.current = event.touches[0].clientX; }} onTouchEnd={(event) => {
+      if (undoSwipeStart.current === null) return;
+      const distance = event.changedTouches[0].clientX - undoSwipeStart.current;
+      if (Math.abs(distance) > 40) dismissUndo();
+      undoSwipeStart.current = null;
+    }}><span>Image removed</span><button type="button" className="undoAction" onClick={undoHistoryRemoval}>Undo</button><button type="button" className="undoClose" onClick={dismissUndo} aria-label="Dismiss undo message">×</button></div>}
 
     <section className="how" id="how"><p className="eyebrow">THREE WAYS TO CREATE</p><h2>One editor.<br />Three flexible workflows.</h2><div className="howGrid"><article><span>01</span><h3>Single</h3><p>Edit one image with a direct natural-language instruction.</p></article><article><span>02</span><h3>Batch</h3><p>Apply one shared prompt to as many as ten images in one run.</p></article><article><span>03</span><h3>Reference</h3><p>Guide a main image with a second visual reference plus your prompt.</p></article></div></section>
     <footer><a className="brand" href="#top"><span className="brandMark">P</span><span>Pixora</span></a><p>AI editing, without the complexity.</p><span>Powered by VModel V-Editor</span></footer>
