@@ -1,31 +1,38 @@
 import { getVModelToken } from "../../../lib/vmodel-token";
+import { createVModelTask } from "../../../lib/vmodel-generate";
 
-const VERSION = "b7eae3b3e3091ec6ce78162ccf39fea6d1fa9aaf41ec1cac375441d1cdc3997f";
+type GenerateBody = {
+  imageUrl?: string;
+  referenceImageUrl?: string;
+  prompt?: string;
+  aspectRatio?: string;
+};
+
+function validHttpsUrl(value?: string) {
+  return Boolean(value?.startsWith("https://"));
+}
 
 export async function POST(request: Request) {
   const token = await getVModelToken();
   if (!token) return Response.json({ error: "VModel API is not configured." }, { status: 503 });
-  const body = await request.json() as { imageUrl?: string; prompt?: string; aspectRatio?: string };
-  if (!body.imageUrl?.startsWith("https://") || !body.prompt?.trim()) return Response.json({ error: "Image and prompt are required." }, { status: 400 });
 
-  const response = await fetch("https://api.vmodel.ai/api/tasks/v1/create", {
-    method: "POST",
-    headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
-    body: JSON.stringify({
-      version: VERSION,
-      input: {
-        input_image: body.imageUrl,
-        prompt: body.prompt.trim(),
-        aspect_ratio: body.aspectRatio || "default",
-        megapixels: 1,
-        steps: 4,
-        result_resolution: 0,
-        file_format: "png",
-        disable_safety_checker: false,
-      },
-    }),
-  });
-  const data = await response.json() as { result?: { task_id?: string }; message?: { en?: string } };
-  if (!response.ok || !data.result?.task_id) return Response.json({ error: data.message?.en || "VModel rejected the request." }, { status: response.ok ? 502 : response.status });
-  return Response.json({ taskId: data.result.task_id });
+  const body = await request.json() as GenerateBody;
+  if (!validHttpsUrl(body.imageUrl) || !body.prompt?.trim()) {
+    return Response.json({ error: "Image and prompt are required." }, { status: 400 });
+  }
+  if (body.referenceImageUrl && !validHttpsUrl(body.referenceImageUrl)) {
+    return Response.json({ error: "Reference image URL is invalid." }, { status: 400 });
+  }
+
+  try {
+    const taskId = await createVModelTask(token, {
+      imageUrl: body.imageUrl!,
+      referenceImageUrl: body.referenceImageUrl,
+      prompt: body.prompt,
+      aspectRatio: body.aspectRatio,
+    });
+    return Response.json({ taskId });
+  } catch (error) {
+    return Response.json({ error: error instanceof Error ? error.message : "Could not start generation." }, { status: 502 });
+  }
 }

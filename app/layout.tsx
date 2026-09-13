@@ -2,6 +2,7 @@ import type { Metadata } from "next";
 import { Geist, Manrope } from "next/font/google";
 import { headers } from "next/headers";
 import "./globals.css";
+import "./modes.css";
 
 const geist = Geist({ variable: "--font-geist", subsets: ["latin"] });
 const manrope = Manrope({ variable: "--font-manrope", subsets: ["latin"] });
