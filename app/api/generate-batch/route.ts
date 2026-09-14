@@ -1,4 +1,4 @@
-import { getVModelToken } from "../../../lib/vmodel-token";
+import { allocateVModelTokenContexts, packVModelTaskId } from "../../../lib/vmodel-token";
 import { createVModelTask } from "../../../lib/vmodel-generate";
 
 type BatchBody = {
@@ -8,9 +8,6 @@ type BatchBody = {
 };
 
 export async function POST(request: Request) {
-  const token = await getVModelToken();
-  if (!token) return Response.json({ error: "VModel API is not configured." }, { status: 503 });
-
   const body = await request.json() as BatchBody;
   const imageUrls = Array.isArray(body.imageUrls) ? body.imageUrls : [];
   if (!body.prompt?.trim()) return Response.json({ error: "A prompt is required." }, { status: 400 });
@@ -21,14 +18,21 @@ export async function POST(request: Request) {
     return Response.json({ error: "One or more uploaded image URLs are invalid." }, { status: 400 });
   }
 
+  const allocations = await allocateVModelTokenContexts(imageUrls.length);
+  if (!allocations.length) {
+    return Response.json({ error: "No usable VModel API key is available. Add another API in Pixora Control." }, { status: 503 });
+  }
+
   const tasks = await Promise.all(imageUrls.map(async (imageUrl, index) => {
+    const context = allocations[index];
+    if (!context) return { index, error: "No queued API key has remaining generation capacity." };
     try {
-      const taskId = await createVModelTask(token, {
+      const taskId = await createVModelTask(context.token, {
         imageUrl,
         prompt: body.prompt!,
         aspectRatio: body.aspectRatio,
       });
-      return { index, taskId };
+      return { index, taskId: packVModelTaskId(taskId, context.fingerprint) };
     } catch (error) {
       return { index, error: error instanceof Error ? error.message : "Could not start generation." };
     }
