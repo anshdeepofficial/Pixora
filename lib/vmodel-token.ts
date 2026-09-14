@@ -14,7 +14,7 @@ export async function saveVModelToken(token: string) {
   const cipher = createCipheriv("aes-256-gcm", encryptionKey(), iv);
   const encrypted = Buffer.concat([cipher.update(token, "utf8"), cipher.final()]);
   const payload = JSON.stringify({ iv: iv.toString("base64"), tag: cipher.getAuthTag().toString("base64"), data: encrypted.toString("base64") });
-  await put(TOKEN_PATH, payload, { access: "public", addRandomSuffix: false, allowOverwrite: true, contentType: "application/octet-stream", cacheControlMaxAge: 0 });
+  await put(TOKEN_PATH, payload, { access: "public", addRandomSuffix: false, allowOverwrite: true, contentType: "application/octet-stream", cacheControlMaxAge: 60 });
 }
 
 async function overrideToken() {
