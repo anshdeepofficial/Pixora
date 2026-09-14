@@ -1,119 +1,128 @@
 import { createHash } from "node:crypto";
-import { imageKitConfigured, uploadImageKitData } from "../../../lib/imagekit";
+import { imageKitConfigured, uploadImageKitRemoteFile } from "../../../lib/imagekit";
 
-export const maxDuration = 120;
+export const maxDuration = 60;
 
-const DEFAULT_ENHANCER_URL = "https://itishanls249-real-esrgan-upscaler.hf.space";
 const MAX_SOURCE_BYTES = 20 * 1024 * 1024;
 
-function enhancerBaseUrl() {
-  return (process.env.PIXORA_ENHANCER_URL?.trim() || DEFAULT_ENHANCER_URL).replace(/\/+$/, "");
+function configuredImageKitHost() {
+  const endpoint = process.env.IMAGEKIT_URL_ENDPOINT?.trim();
+  if (!endpoint) return "";
+  try { return new URL(endpoint).hostname; } catch { return ""; }
 }
 
-function wait(ms: number) {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
-async function fetchWithTimeout(url: string, init: RequestInit = {}, timeoutMs = 20_000) {
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), timeoutMs);
+function isImageKitUrl(value: string) {
   try {
-    return await fetch(url, { ...init, signal: controller.signal, cache: "no-store" });
-  } finally {
-    clearTimeout(timer);
+    const host = new URL(value).hostname;
+    const configured = configuredImageKitHost();
+    return host.endsWith(".imagekit.io") || host === "ik.imagekit.io" || Boolean(configured && host === configured);
+  } catch {
+    return false;
   }
 }
 
-async function waitForEnhancer(baseUrl: string) {
-  for (let attempt = 0; attempt < 18; attempt++) {
-    try {
-      const response = await fetchWithTimeout(`${baseUrl}/health`, {}, 8_000);
-      if (response.ok) {
-        const data = await response.json().catch(() => ({})) as { status?: string; models_loaded?: boolean; models_error?: string | null };
-        if (data.models_loaded || data.status === "healthy") return;
-        if (data.models_error) throw new Error(data.models_error);
-      }
-    } catch (error) {
-      if (attempt === 17) throw error;
-    }
-    await wait(1_500);
+function extensionFromUrl(value: string) {
+  try {
+    const match = new URL(value).pathname.match(/\.(png|jpe?g|webp|avif)$/i);
+    return match ? match[1].toLowerCase().replace("jpeg", "jpg") : "png";
+  } catch {
+    return "png";
   }
-  throw new Error("The enhancement server is still warming up. Please try again in a moment.");
 }
 
-async function sourceImage(imageUrl: string) {
-  const response = await fetchWithTimeout(imageUrl, {}, 30_000);
-  if (!response.ok) throw new Error(`Could not load the source image (${response.status}).`);
-  const contentType = response.headers.get("content-type") || "image/png";
-  if (!contentType.startsWith("image/")) throw new Error("The source URL did not return an image.");
-  const data = new Uint8Array(await response.arrayBuffer());
-  if (!data.length) throw new Error("The source image is empty.");
-  if (data.length > MAX_SOURCE_BYTES) throw new Error("The source image is too large to enhance.");
-  return { data, contentType };
+async function ensureImageKitSource(imageUrl: string) {
+  if (isImageKitUrl(imageUrl)) return imageUrl;
+
+  const probe = await fetch(imageUrl, { cache: "no-store" });
+  if (!probe.ok) throw new Error(`Could not load the source image (${probe.status}).`);
+  const type = probe.headers.get("content-type") || "";
+  if (!type.startsWith("image/")) throw new Error("The source URL did not return an image.");
+  const length = Number(probe.headers.get("content-length") || 0);
+  if (length > MAX_SOURCE_BYTES) throw new Error("The source image is too large to enhance.");
+  try { await probe.body?.cancel(); } catch {}
+
+  const key = createHash("sha256").update(imageUrl).digest("hex").slice(0, 24);
+  const persisted = await uploadImageKitRemoteFile(
+    imageUrl,
+    `enhance-source-${key}.${extensionFromUrl(imageUrl)}`,
+    "/pixora-enhance-sources",
+    ["pixora-enhance-source"],
+  );
+  return persisted.url;
 }
 
-async function runEnhancer(baseUrl: string, image: Uint8Array, contentType: string, scale: 2 | 4) {
-  const form = new FormData();
-  const payload = image.buffer.slice(image.byteOffset, image.byteOffset + image.byteLength) as ArrayBuffer;
-  form.set("file", new Blob([payload], { type: contentType }), `pixora-source.${contentType.includes("jpeg") ? "jpg" : "png"}`);
-  form.set("scale", String(scale));
+function imageKitUpscaleUrl(sourceUrl: string) {
+  const url = new URL(sourceUrl);
+  const existing = url.searchParams.get("tr")?.trim();
+  const hasUpscale = existing?.split(":").some((part) => part.split(",").includes("e-upscale"));
+  if (!hasUpscale) url.searchParams.set("tr", existing ? `${existing}:e-upscale` : "e-upscale");
+  return url.toString();
+}
 
-  let response = await fetchWithTimeout(`${baseUrl}/image_enhancer`, { method: "POST", body: form }, 95_000);
-  if (response.status === 503) {
-    await waitForEnhancer(baseUrl);
-    response = await fetchWithTimeout(`${baseUrl}/image_enhancer`, { method: "POST", body: form }, 95_000);
+async function checkUpscale(url: string) {
+  const response = await fetch(url, {
+    cache: "no-store",
+    headers: { Accept: "image/avif,image/webp,image/png,image/jpeg,*/*" },
+  });
+
+  const intermediate = response.headers.get("is-intermediate-response") === "true";
+  if (intermediate) {
+    try { await response.body?.cancel(); } catch {}
+    return { status: "processing" as const };
   }
 
   if (!response.ok) {
-    let detail = `Enhancement server failed (${response.status}).`;
+    const ikError = response.headers.get("ik-error") || "";
+    let detail = ikError || `ImageKit AI enhancement failed (${response.status}).`;
     try {
-      const data = await response.json() as { detail?: string };
-      if (data.detail) detail = data.detail;
+      const text = await response.text();
+      if (text && text.length < 500 && !text.trim().startsWith("<")) detail = text;
     } catch {}
     throw new Error(detail);
   }
 
-  const contentTypeOut = response.headers.get("content-type") || "image/png";
-  if (!contentTypeOut.startsWith("image/")) throw new Error("The enhancement server returned an invalid response.");
-  const output = new Uint8Array(await response.arrayBuffer());
-  if (!output.length) throw new Error("The enhancement server returned an empty image.");
-  return { output, contentType: contentTypeOut };
+  const contentType = response.headers.get("content-type") || "";
+  if (!contentType.startsWith("image/")) {
+    try { await response.body?.cancel(); } catch {}
+    return { status: "processing" as const };
+  }
+
+  try { await response.body?.cancel(); } catch {}
+  return { status: "succeeded" as const };
 }
 
 export async function POST(request: Request) {
-  const body = await request.json() as { imageUrl?: string; scale?: number };
-  const imageUrl = body.imageUrl?.trim() || "";
-  const scale: 2 | 4 = body.scale === 4 ? 4 : 2;
+  if (!imageKitConfigured()) {
+    return Response.json({ error: "ImageKit must be configured for AI enhancement." }, { status: 503 });
+  }
 
+  const body = await request.json() as { imageUrl?: string };
+  const imageUrl = body.imageUrl?.trim() || "";
   if (!imageUrl.startsWith("https://")) {
     return Response.json({ error: "A valid HTTPS image URL is required." }, { status: 400 });
   }
-  if (!imageKitConfigured()) {
-    return Response.json({ error: "ImageKit must be configured to save enhanced images." }, { status: 503 });
-  }
 
   try {
-    const baseUrl = enhancerBaseUrl();
-    await waitForEnhancer(baseUrl);
-    const source = await sourceImage(imageUrl);
-    const enhanced = await runEnhancer(baseUrl, source.data, source.contentType, scale);
-    const key = createHash("sha256").update(`${imageUrl}|${scale}|realesrgan`).digest("hex").slice(0, 24);
-    const persisted = await uploadImageKitData(
-      Buffer.from(enhanced.output),
-      `realesrgan-${scale}x-${key}.png`,
-      "/pixora-enhanced/realesrgan",
-      enhanced.contentType,
-    );
+    const sourceUrl = await ensureImageKitSource(imageUrl);
+    const outputUrl = imageKitUpscaleUrl(sourceUrl);
+    const result = await checkUpscale(outputUrl);
+
+    if (result.status === "processing") {
+      return Response.json({
+        status: "processing",
+        engine: "ImageKit AI Upscale",
+      }, { status: 202, headers: { "Cache-Control": "no-store" } });
+    }
 
     return Response.json({
       status: "succeeded",
-      output: [persisted.url],
-      scale,
-      engine: "Real-ESRGAN",
+      output: [outputUrl],
+      engine: "ImageKit AI Upscale",
+      megapixels: 16,
     }, { headers: { "Cache-Control": "no-store" } });
   } catch (error) {
-    const message = error instanceof Error ? error.message : "Server-side image enhancement failed.";
-    const timeout = /abort|timeout|warming up/i.test(message);
-    return Response.json({ error: message }, { status: timeout ? 504 : 502 });
+    return Response.json({
+      error: error instanceof Error ? error.message : "Server-side AI enhancement failed.",
+    }, { status: 502, headers: { "Cache-Control": "no-store" } });
   }
 }
