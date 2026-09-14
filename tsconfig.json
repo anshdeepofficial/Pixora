@@ -20,7 +20,7 @@
     ],
     "paths": {
       "@/*": ["./*"],
-      "@vercel/blob/client": ["./lib/r2-upload-client.ts"]
+      "@vercel/blob/client": ["./lib/imagekit-upload-client.ts"]
     }
   },
   "include": [
