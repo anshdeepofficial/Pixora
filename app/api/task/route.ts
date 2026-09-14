@@ -1,5 +1,5 @@
 import { getVModelToken, vModelTokenFingerprint } from "../../../lib/vmodel-token";
-import { imageKitConfigured, uploadImageKitRemoteFile } from "../../../lib/imagekit";
+import { imageKitConfigured, uploadImageKitData, uploadImageKitRemoteFile } from "../../../lib/imagekit";
 
 function extensionFromUrl(value: string) {
   try {
@@ -29,9 +29,10 @@ export async function GET(request: Request) {
 
   if (data.result.status === "succeeded" && data.result.output?.[0] && imageKitConfigured()) {
     const originalOutput = data.result.output[0];
+    const fingerprint = vModelTokenFingerprint(token);
+
     try {
       const extension = extensionFromUrl(originalOutput);
-      const fingerprint = vModelTokenFingerprint(token);
       const persisted = await uploadImageKitRemoteFile(
         originalOutput,
         `${id}.${extension}`,
@@ -43,6 +44,19 @@ export async function GET(request: Request) {
     } catch (error) {
       console.error("Could not persist Pixora generation in ImageKit", error);
       output = data.result.output;
+    }
+
+    // A task ID is unique, so overwriting this tiny marker makes counting idempotent
+    // even though the client polls a succeeded task more than once.
+    try {
+      await uploadImageKitData(
+        JSON.stringify({ taskId: id, completedAt: new Date().toISOString() }),
+        `${id}.json`,
+        `/pixora-counts/${fingerprint}`,
+        "application/json",
+      );
+    } catch (error) {
+      console.error("Could not persist Pixora generation counter marker", error);
     }
   }
 
