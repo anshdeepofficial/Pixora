@@ -1,4 +1,4 @@
-import { getVModelToken } from "../../../lib/vmodel-token";
+import { getVModelToken, vModelTokenFingerprint } from "../../../lib/vmodel-token";
 import { imageKitConfigured, uploadImageKitRemoteFile } from "../../../lib/imagekit";
 
 function extensionFromUrl(value: string) {
@@ -31,11 +31,12 @@ export async function GET(request: Request) {
     const originalOutput = data.result.output[0];
     try {
       const extension = extensionFromUrl(originalOutput);
+      const fingerprint = vModelTokenFingerprint(token);
       const persisted = await uploadImageKitRemoteFile(
         originalOutput,
         `${id}.${extension}`,
-        "/pixora-results",
-        ["pixora-result"],
+        `/pixora-results/${fingerprint}`,
+        ["pixora-result", `vmodel-${fingerprint}`],
       );
       output = [persisted.url, ...data.result.output.slice(1)];
       outputFileId = persisted.fileId;
