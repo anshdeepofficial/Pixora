@@ -1,47 +1,34 @@
-import { list } from "@vercel/blob";
-import {
-  getVModelToken,
-  hasVModelTokenOverride,
-  vModelTokenFingerprint,
-} from "../../../lib/vmodel-token";
+import { deleteExpiredImageKitFiles, imageKitConfigured } from "../../../lib/imagekit";
 
 const EXISTING_GENERATIONS = 11;
+const ONE_HOUR = 60 * 60 * 1000;
+const ONE_DAY = 24 * ONE_HOUR;
 
 export async function GET() {
-  const token = await getVModelToken();
-  if (!token) {
+  if (!imageKitConfigured()) {
     return Response.json(
-      { totalGenerated: 0 },
+      { totalGenerated: EXISTING_GENERATIONS },
       { headers: { "Cache-Control": "no-store, max-age=0" } },
     );
   }
 
-  const isOverride = await hasVModelTokenOverride();
-  const startingTotal = isOverride ? 0 : EXISTING_GENERATIONS;
-  const prefix = `pixora-generations/${vModelTokenFingerprint(token)}/`;
-
   try {
-    let cursor: string | undefined;
-    let recorded = 0;
-
-    do {
-      const page = await list({
-        prefix,
-        limit: 1000,
-        cursor,
-      });
-      recorded += page.blobs.length;
-      cursor = page.hasMore ? page.cursor : undefined;
-    } while (cursor);
+    const [inputs, results] = await Promise.all([
+      deleteExpiredImageKitFiles("/pixora-inputs/", ONE_HOUR),
+      deleteExpiredImageKitFiles("/pixora-results/", ONE_DAY),
+    ]);
 
     return Response.json(
-      { totalGenerated: startingTotal + recorded },
+      {
+        totalGenerated: EXISTING_GENERATIONS + results.remaining,
+        cleanup: { expiredInputs: inputs.deleted, expiredResults: results.deleted },
+      },
       { headers: { "Cache-Control": "no-store, max-age=0" } },
     );
   } catch (error) {
-    console.error("Could not load Pixora generation total", error);
+    console.error("Could not load Pixora ImageKit stats", error);
     return Response.json(
-      { totalGenerated: startingTotal },
+      { totalGenerated: EXISTING_GENERATIONS },
       { headers: { "Cache-Control": "no-store, max-age=0" } },
     );
   }
