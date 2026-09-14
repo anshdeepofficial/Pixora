@@ -1,7 +1,8 @@
 import { createCipheriv, createDecipheriv, createHash, randomBytes } from "node:crypto";
-import { list, put } from "@vercel/blob";
+import { imageKitConfigured, listImageKitAssets, uploadImageKitData } from "./imagekit";
 
-const TOKEN_PATH = "pixora-private/vmodel-token.enc";
+const TOKEN_FILE = "vmodel-token.enc";
+const TOKEN_FOLDER = "/pixora-private";
 
 function encryptionKey() {
   const secret = process.env.PIXORA_ADMIN_SECRET;
@@ -10,18 +11,24 @@ function encryptionKey() {
 }
 
 export async function saveVModelToken(token: string) {
+  if (!imageKitConfigured()) throw new Error("ImageKit storage is not configured.");
   const iv = randomBytes(12);
   const cipher = createCipheriv("aes-256-gcm", encryptionKey(), iv);
   const encrypted = Buffer.concat([cipher.update(token, "utf8"), cipher.final()]);
-  const payload = JSON.stringify({ iv: iv.toString("base64"), tag: cipher.getAuthTag().toString("base64"), data: encrypted.toString("base64") });
-  await put(TOKEN_PATH, payload, { access: "public", addRandomSuffix: false, allowOverwrite: true, contentType: "application/octet-stream", cacheControlMaxAge: 60 });
+  const payload = JSON.stringify({
+    iv: iv.toString("base64"),
+    tag: cipher.getAuthTag().toString("base64"),
+    data: encrypted.toString("base64"),
+  });
+  await uploadImageKitData(payload, TOKEN_FILE, TOKEN_FOLDER, "application/octet-stream");
 }
 
 async function overrideToken() {
-  const result = await list({ prefix: TOKEN_PATH, limit: 1 });
-  const blob = result.blobs.find((item) => item.pathname === TOKEN_PATH);
-  if (!blob) return null;
-  const response = await fetch(blob.url, { cache: "no-store" });
+  if (!imageKitConfigured()) return null;
+  const assets = await listImageKitAssets(`${TOKEN_FOLDER}/`, 100);
+  const asset = assets.find((item) => item.name === TOKEN_FILE || item.filePath === `${TOKEN_FOLDER}/${TOKEN_FILE}`);
+  if (!asset?.url) return null;
+  const response = await fetch(asset.url, { cache: "no-store" });
   if (!response.ok) throw new Error("Could not load the saved API key.");
   const payload = await response.json() as { iv: string; tag: string; data: string };
   const decipher = createDecipheriv("aes-256-gcm", encryptionKey(), Buffer.from(payload.iv, "base64"));
@@ -44,11 +51,20 @@ export function vModelTokenFingerprint(token: string) {
 }
 
 export async function hasVModelTokenOverride() {
-  return Boolean(await overrideToken());
+  try {
+    return Boolean(await overrideToken());
+  } catch {
+    return false;
+  }
 }
 
 export async function getVModelTokenInfo() {
-  const saved = await overrideToken();
+  let saved: string | null = null;
+  try { saved = await overrideToken(); } catch {}
   const token = saved || process.env.VMODEL_API_TOKEN || "";
-  return { configured: Boolean(token), source: saved ? "admin override" : token ? "Vercel environment" : "none", masked: token ? `••••••••${token.slice(-4)}` : "" };
+  return {
+    configured: Boolean(token),
+    source: saved ? "admin override" : token ? "Vercel environment" : "none",
+    masked: token ? `••••••••${token.slice(-4)}` : "",
+  };
 }
