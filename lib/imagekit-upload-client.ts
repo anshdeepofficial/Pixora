@@ -71,7 +71,7 @@ function scheduleCleanup(fileId: string) {
   }, 15 * 60 * 1000);
 }
 
-export async function upload(pathname: string, file: File, options: UploadOptions = {}) {
+async function uploadToImageKit(pathname: string, file: File, options: UploadOptions, folder: string, tags: string, maxSize: string) {
   const authResponse = await fetch("/api/imagekit-auth", { cache: "no-store" });
   const auth = await authResponse.json() as AuthResponse;
   if (!authResponse.ok || !auth.token || !auth.expire || !auth.signature || !auth.publicKey) {
@@ -85,16 +85,31 @@ export async function upload(pathname: string, file: File, options: UploadOption
   formData.set("signature", auth.signature);
   formData.set("expire", String(auth.expire));
   formData.set("token", auth.token);
-  formData.set("folder", "/pixora-inputs");
+  formData.set("folder", folder);
   formData.set("useUniqueFileName", "true");
-  formData.set("tags", "pixora-input");
-  formData.set("checks", "'file.size' <= '12mb' AND 'file.mime' IN ['image/jpeg','image/png','image/webp']");
+  formData.set("tags", tags);
+  formData.set("checks", `'file.size' <= '${maxSize}' AND 'file.mime' IN ['image/jpeg','image/png','image/webp']`);
 
   options.onUploadProgress?.({ percentage: 0 });
   const uploaded = await uploadWithProgress(formData, options.onUploadProgress);
   options.onUploadProgress?.({ percentage: 100 });
+  return uploaded;
+}
+
+export async function upload(pathname: string, file: File, options: UploadOptions = {}) {
+  const uploaded = await uploadToImageKit(pathname, file, options, "/pixora-inputs", "pixora-input", "12mb");
   scheduleCleanup(uploaded.fileId!);
 
+  return {
+    url: uploaded.url!,
+    pathname: uploaded.filePath || pathname,
+    contentType: file.type,
+    fileId: uploaded.fileId!,
+  };
+}
+
+export async function uploadResult(pathname: string, file: File, options: UploadOptions = {}) {
+  const uploaded = await uploadToImageKit(pathname, file, options, "/pixora-results/batch", "pixora-result,pixora-batch-split", "20mb");
   return {
     url: uploaded.url!,
     pathname: uploaded.filePath || pathname,
