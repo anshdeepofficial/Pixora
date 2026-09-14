@@ -25,6 +25,9 @@ type UploadResponse = {
   message?: string;
 };
 
+const cleanupIds = new Set<string>();
+let cleanupTimer: number | null = null;
+
 function safeFileName(pathname: string) {
   const name = pathname.split("/").pop() || "image";
   return name.replace(/[^a-zA-Z0-9._-]/g, "_").slice(-120) || "image";
@@ -51,12 +54,18 @@ function uploadWithProgress(formData: FormData, onProgress?: (event: UploadProgr
   });
 }
 
-async function scheduleCleanup(fileId: string) {
-  window.setTimeout(() => {
+function scheduleCleanup(fileId: string) {
+  cleanupIds.add(fileId);
+  if (cleanupTimer !== null) return;
+  cleanupTimer = window.setTimeout(() => {
+    const fileIds = Array.from(cleanupIds);
+    cleanupIds.clear();
+    cleanupTimer = null;
+    if (!fileIds.length) return;
     void fetch("/api/imagekit-cleanup", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ fileIds: [fileId], folder: "/pixora-inputs" }),
+      body: JSON.stringify({ fileIds, folder: "/pixora-inputs" }),
       keepalive: true,
     }).catch(() => undefined);
   }, 15 * 60 * 1000);
@@ -84,7 +93,7 @@ export async function upload(pathname: string, file: File, options: UploadOption
   options.onUploadProgress?.({ percentage: 0 });
   const uploaded = await uploadWithProgress(formData, options.onUploadProgress);
   options.onUploadProgress?.({ percentage: 100 });
-  void scheduleCleanup(uploaded.fileId!);
+  scheduleCleanup(uploaded.fileId!);
 
   return {
     url: uploaded.url!,
