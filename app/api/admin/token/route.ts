@@ -24,7 +24,7 @@ export async function GET() {
 
 export async function PUT(request: Request) {
   if (!await authorized()) return Response.json({ error: "Unauthorized." }, { status: 401 });
-  const body = await request.json() as { token?: string };
+  const body = await request.json() as { token?: string; activate?: boolean };
   const token = body.token?.trim() || "";
 
   try {
@@ -34,11 +34,16 @@ export async function PUT(request: Request) {
     }
 
     if (token.length < 16 || token.length > 500 || /\s/.test(token)) {
-      return Response.json({ error: "Enter a valid VModel API key, or leave it blank to use the Vercel environment key." }, { status: 400 });
+      return Response.json({ error: "Enter a valid VModel API key." }, { status: 400 });
     }
 
     const queued = await queueVModelToken(token);
-    return Response.json({ ok: true, added: queued.added, ...queued.info });
+    if (body.activate) {
+      const info = await activateVModelToken(queued.fingerprint);
+      return Response.json({ ok: true, added: queued.added, activated: true, ...info });
+    }
+
+    return Response.json({ ok: true, added: queued.added, activated: false, ...queued.info });
   } catch (error) {
     console.error("Could not update API rotation", error);
     return Response.json({ error: error instanceof Error ? error.message : "Could not securely update the API rotation." }, { status: 500 });
