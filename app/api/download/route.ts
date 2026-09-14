@@ -6,6 +6,7 @@ const ALLOWED_HOSTS = [
   "storage.googleapis.com",
   "blob.vercel-storage.com",
   "r2.cloudflarestorage.com",
+  "imagekit.io",
 ];
 
 function isAllowedImageUrl(imageUrl: URL) {
