@@ -1,5 +1,5 @@
 import { createCipheriv, createDecipheriv, createHash, randomBytes } from "node:crypto";
-import { imageKitConfigured, listImageKitAssets, uploadImageKitData } from "./imagekit";
+import { deleteImageKitFiles, imageKitConfigured, listImageKitAssets, uploadImageKitData } from "./imagekit";
 
 const TOKEN_FILE = "vmodel-token.enc";
 const TOKEN_FOLDER = "/pixora-private";
@@ -8,6 +8,12 @@ function encryptionKey() {
   const secret = process.env.PIXORA_ADMIN_SECRET;
   if (!secret) throw new Error("PIXORA_ADMIN_SECRET is not configured.");
   return createHash("sha256").update(secret).digest();
+}
+
+async function tokenAssets() {
+  if (!imageKitConfigured()) return [];
+  const assets = await listImageKitAssets(`${TOKEN_FOLDER}/`, 100);
+  return assets.filter((item) => item.name === TOKEN_FILE || item.filePath === `${TOKEN_FOLDER}/${TOKEN_FILE}`);
 }
 
 export async function saveVModelToken(token: string) {
@@ -23,10 +29,15 @@ export async function saveVModelToken(token: string) {
   await uploadImageKitData(payload, TOKEN_FILE, TOKEN_FOLDER, "application/octet-stream");
 }
 
+export async function clearVModelTokenOverride() {
+  if (!imageKitConfigured()) return;
+  const assets = await tokenAssets();
+  if (assets.length) await deleteImageKitFiles(assets.map((item) => item.fileId));
+}
+
 async function overrideToken() {
-  if (!imageKitConfigured()) return null;
-  const assets = await listImageKitAssets(`${TOKEN_FOLDER}/`, 100);
-  const asset = assets.find((item) => item.name === TOKEN_FILE || item.filePath === `${TOKEN_FOLDER}/${TOKEN_FILE}`);
+  const assets = await tokenAssets();
+  const asset = assets[0];
   if (!asset?.url) return null;
   const response = await fetch(asset.url, { cache: "no-store" });
   if (!response.ok) throw new Error("Could not load the saved API key.");
