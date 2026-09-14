@@ -1,7 +1,6 @@
-import { deleteExpiredImageKitFiles, imageKitConfigured, listImageKitAssets } from "../../../lib/imagekit";
-import { getVModelToken, vModelTokenFingerprint } from "../../../lib/vmodel-token";
+import { deleteExpiredImageKitFiles, imageKitConfigured } from "../../../lib/imagekit";
+import { getVModelGenerationCount, getVModelTokenContext } from "../../../lib/vmodel-token";
 
-const ORIGINAL_API_BASELINE = 300;
 const ONE_HOUR = 60 * 60 * 1000;
 const ONE_DAY = 24 * ONE_HOUR;
 
@@ -24,42 +23,37 @@ async function fetchVModelCreditsLeft(token: string) {
 }
 
 export async function GET() {
-  const token = await getVModelToken();
-  if (!token) {
+  const context = await getVModelTokenContext();
+  if (!context) {
     return Response.json(
       { totalGenerated: 0, creditsLeft: null },
       { headers: { "Cache-Control": "no-store, max-age=0" } },
     );
   }
 
-  const fingerprint = vModelTokenFingerprint(token);
-  const originalToken = process.env.VMODEL_API_TOKEN?.trim() || "";
-  const isOriginalApi = Boolean(originalToken && token === originalToken);
-  const baseline = isOriginalApi ? ORIGINAL_API_BASELINE : 0;
-  const creditsLeftPromise = fetchVModelCreditsLeft(token);
+  const countPromise = getVModelGenerationCount(context.fingerprint);
+  const creditsLeftPromise = fetchVModelCreditsLeft(context.token);
 
   if (!imageKitConfigured()) {
     return Response.json(
-      { totalGenerated: baseline, creditsLeft: await creditsLeftPromise },
+      { totalGenerated: await countPromise, creditsLeft: await creditsLeftPromise, apiFingerprint: context.fingerprint },
       { headers: { "Cache-Control": "no-store, max-age=0" } },
     );
   }
 
   try {
-    const countPath = `/pixora-counts/${fingerprint}/`;
-
-    const [inputsCleanup, resultsCleanup, markers, creditsLeft] = await Promise.all([
+    const [totalGenerated, creditsLeft, inputsCleanup, resultsCleanup] = await Promise.all([
+      countPromise,
+      creditsLeftPromise,
       deleteExpiredImageKitFiles("/pixora-inputs/", ONE_HOUR),
       deleteExpiredImageKitFiles("/pixora-results/", ONE_DAY),
-      listImageKitAssets(countPath, 1000),
-      creditsLeftPromise,
     ]);
 
     return Response.json(
       {
-        totalGenerated: baseline + markers.length,
+        totalGenerated,
         creditsLeft,
-        apiFingerprint: fingerprint,
+        apiFingerprint: context.fingerprint,
         cleanup: {
           expiredInputs: inputsCleanup.deleted,
           expiredResults: resultsCleanup.deleted,
@@ -68,9 +62,9 @@ export async function GET() {
       { headers: { "Cache-Control": "no-store, max-age=0" } },
     );
   } catch (error) {
-    console.error("Could not load Pixora ImageKit stats", error);
+    console.error("Could not load Pixora stats", error);
     return Response.json(
-      { totalGenerated: baseline, creditsLeft: await creditsLeftPromise, apiFingerprint: fingerprint },
+      { totalGenerated: await countPromise, creditsLeft: await creditsLeftPromise, apiFingerprint: context.fingerprint },
       { headers: { "Cache-Control": "no-store, max-age=0" } },
     );
   }
