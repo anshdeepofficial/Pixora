@@ -5,6 +5,9 @@ type BatchBody = {
   imageUrls?: string[];
   prompt?: string;
   aspectRatio?: string;
+  prompts?: string[];
+  aspectRatios?: string[];
+  resultResolutions?: number[];
 };
 
 export async function POST(request: Request) {
@@ -27,10 +30,15 @@ export async function POST(request: Request) {
     const context = allocations[index];
     if (!context) return { index, error: "No queued API key has remaining generation capacity." };
     try {
+      const taskPrompt = body.prompts?.[index]?.trim() || body.prompt!;
+      const taskAspectRatio = body.aspectRatios?.[index] || body.aspectRatio;
+      const requestedResolution = body.resultResolutions?.[index];
+      const resultResolution: 0 | 1 | 2 = requestedResolution === 2 ? 2 : requestedResolution === 1 ? 1 : 0;
       const taskId = await createVModelTask(context.token, {
         imageUrl,
-        prompt: body.prompt!,
-        aspectRatio: body.aspectRatio,
+        prompt: taskPrompt,
+        aspectRatio: taskAspectRatio,
+        resultResolution,
       });
       return { index, taskId: packVModelTaskId(taskId, context.fingerprint) };
     } catch (error) {
