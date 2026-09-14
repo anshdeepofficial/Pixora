@@ -46,15 +46,16 @@ async function sourceImage(imageUrl: string) {
   if (!response.ok) throw new Error(`Could not load the source image (${response.status}).`);
   const contentType = response.headers.get("content-type") || "image/png";
   if (!contentType.startsWith("image/")) throw new Error("The source URL did not return an image.");
-  const data = Buffer.from(await response.arrayBuffer());
+  const data = new Uint8Array(await response.arrayBuffer());
   if (!data.length) throw new Error("The source image is empty.");
   if (data.length > MAX_SOURCE_BYTES) throw new Error("The source image is too large to enhance.");
   return { data, contentType };
 }
 
-async function runEnhancer(baseUrl: string, image: Buffer, contentType: string, scale: 2 | 4) {
+async function runEnhancer(baseUrl: string, image: Uint8Array, contentType: string, scale: 2 | 4) {
   const form = new FormData();
-  form.set("file", new Blob([image], { type: contentType }), `pixora-source.${contentType.includes("jpeg") ? "jpg" : "png"}`);
+  const payload = image.buffer.slice(image.byteOffset, image.byteOffset + image.byteLength) as ArrayBuffer;
+  form.set("file", new Blob([payload], { type: contentType }), `pixora-source.${contentType.includes("jpeg") ? "jpg" : "png"}`);
   form.set("scale", String(scale));
 
   let response = await fetchWithTimeout(`${baseUrl}/image_enhancer`, { method: "POST", body: form }, 95_000);
@@ -74,7 +75,7 @@ async function runEnhancer(baseUrl: string, image: Buffer, contentType: string, 
 
   const contentTypeOut = response.headers.get("content-type") || "image/png";
   if (!contentTypeOut.startsWith("image/")) throw new Error("The enhancement server returned an invalid response.");
-  const output = Buffer.from(await response.arrayBuffer());
+  const output = new Uint8Array(await response.arrayBuffer());
   if (!output.length) throw new Error("The enhancement server returned an empty image.");
   return { output, contentType: contentTypeOut };
 }
@@ -98,7 +99,7 @@ export async function POST(request: Request) {
     const enhanced = await runEnhancer(baseUrl, source.data, source.contentType, scale);
     const key = createHash("sha256").update(`${imageUrl}|${scale}|realesrgan`).digest("hex").slice(0, 24);
     const persisted = await uploadImageKitData(
-      enhanced.output,
+      Buffer.from(enhanced.output),
       `realesrgan-${scale}x-${key}.png`,
       "/pixora-enhanced/realesrgan",
       enhanced.contentType,
