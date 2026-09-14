@@ -27,6 +27,23 @@ type TokenResponse = TokenInfo & {
   activatedVercel?: boolean;
 };
 
+function stableApiOrder(apis: ApiInfo[]) {
+  return [...apis].sort((left, right) => {
+    if (left.source !== right.source) {
+      if (left.source === "vercel") return -1;
+      if (right.source === "vercel") return 1;
+    }
+
+    const leftTime = Date.parse(left.addedAt);
+    const rightTime = Date.parse(right.addedAt);
+    if (Number.isFinite(leftTime) && Number.isFinite(rightTime) && leftTime !== rightTime) {
+      return leftTime - rightTime;
+    }
+
+    return left.fingerprint.localeCompare(right.fingerprint);
+  });
+}
+
 export default function CredentialControl() {
   const [unlocked, setUnlocked] = useState(false);
   const [password, setPassword] = useState("");
@@ -124,7 +141,7 @@ export default function CredentialControl() {
   }
 
   const generationLimit = info?.generationLimit || 300;
-  const apis = info?.apis || [];
+  const apis = stableApiOrder(info?.apis || []);
 
   return <main className="adminShell"><section className="adminCard">
     <div className="adminBrand"><span className="brandMark">P</span><div><strong>Pixora Control</strong><small>Private credential settings</small></div></div>
@@ -154,14 +171,15 @@ export default function CredentialControl() {
       </form>
 
       <section className="apiRotation" aria-label="Saved VModel API rotation">
-        <div className="apiRotationHead"><div><h2>API rotation</h2><p>{apis.length} saved {apis.length === 1 ? "API" : "APIs"}</p></div><span>{generationLimit} max / API</span></div>
+        <div className="apiRotationHead"><div><h2>API rotation</h2><p>{apis.length} saved {apis.length === 1 ? "API" : "APIs"} · numbering stays fixed in the order added</p></div><span>{generationLimit} max / API</span></div>
         {apis.length ? <div className="apiList">{apis.map((api, index) => {
           const current = api.status === "Currently using";
           const percent = Math.min(100, (api.generated / generationLimit) * 100);
+          const displayStatus = api.status.startsWith("Queued") ? "Queued" : api.status;
           return <article key={api.fingerprint} className={current ? "current" : ""}>
             <div className="apiNumber">{index + 1}</div>
             <div className="apiDetails">
-              <div className="apiLine"><strong>{api.masked}</strong><span className={`apiState ${current ? "active" : api.status.startsWith("Queued") ? "queued" : "previous"}`}>{api.status}</span></div>
+              <div className="apiLine"><strong>{api.masked}</strong><span className={`apiState ${current ? "active" : api.status.startsWith("Queued") ? "queued" : "previous"}`}>{displayStatus}</span></div>
               <div className="apiCount"><span>{api.generated} / {generationLimit} generated</span><b>{Math.max(0, generationLimit - api.generated)} left</b></div>
               <div className="apiMeter"><i style={{ width: `${percent}%` }} /></div>
             </div>
