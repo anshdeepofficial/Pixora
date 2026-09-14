@@ -5,8 +5,8 @@ import { useEffect, useRef, useState } from "react";
 
 const TFJS_URL = "https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.22.0/dist/tf.min.js";
 const UPSCALER_URL = "https://cdn.jsdelivr.net/npm/upscaler@1.0.0/dist/browser/umd/upscaler.min.js";
-const ESRGAN_2X_URL = "https://cdn.jsdelivr.net/npm/@upscalerjs/esrgan-medium@1.0.0/dist/umd/2x.min.js";
-const ESRGAN_4X_URL = "https://cdn.jsdelivr.net/npm/@upscalerjs/esrgan-medium@1.0.0/dist/umd/4x.min.js";
+const ESRGAN_2X_URL = "https://cdn.jsdelivr.net/npm/@upscalerjs/esrgan-medium@1.0.0/dist/umd/models/esrgan-medium/src/x2/index.min.js";
+const ESRGAN_4X_URL = "https://cdn.jsdelivr.net/npm/@upscalerjs/esrgan-medium@1.0.0/dist/umd/models/esrgan-medium/src/x4/index.min.js";
 const FFLATE_URL = "https://cdn.jsdelivr.net/npm/fflate@0.8.3/umd/index.js";
 const CACHE_NAME = "pixora-ai-enhance-v1";
 const MODEL_VERSION = "esrgan-medium-1.0.0";
