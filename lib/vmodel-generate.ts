@@ -5,6 +5,7 @@ type CreateTaskInput = {
   referenceImageUrl?: string;
   prompt: string;
   aspectRatio?: string;
+  resultResolution?: 0 | 1 | 2;
 };
 
 export async function createVModelTask(token: string, input: CreateTaskInput) {
@@ -20,7 +21,7 @@ export async function createVModelTask(token: string, input: CreateTaskInput) {
         aspect_ratio: input.aspectRatio || "default",
         megapixels: 1,
         steps: 4,
-        result_resolution: 0,
+        result_resolution: input.resultResolution ?? 0,
         file_format: "png",
         disable_safety_checker: false,
       },
