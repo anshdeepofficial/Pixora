@@ -1,4 +1,4 @@
-const encoder = new TextEncoder();
+import { createHash, createHmac } from "node:crypto";
 
 function rfc3986(value: string) {
   return encodeURIComponent(value).replace(/[!'()*]/g, (character) => `%${character.charCodeAt(0).toString(16).toUpperCase()}`);
@@ -8,25 +8,12 @@ function encodeKey(key: string) {
   return key.split("/").map(rfc3986).join("/");
 }
 
-function hex(bytes: Uint8Array) {
-  return Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("");
+function sha256(value: string) {
+  return createHash("sha256").update(value, "utf8").digest("hex");
 }
 
-async function sha256(value: string) {
-  const digest = await crypto.subtle.digest("SHA-256", encoder.encode(value));
-  return hex(new Uint8Array(digest));
-}
-
-async function hmac(key: Uint8Array, value: string) {
-  const cryptoKey = await crypto.subtle.importKey(
-    "raw",
-    key,
-    { name: "HMAC", hash: "SHA-256" },
-    false,
-    ["sign"],
-  );
-  const signature = await crypto.subtle.sign("HMAC", cryptoKey, encoder.encode(value));
-  return new Uint8Array(signature);
+function hmac(key: string | Buffer, value: string) {
+  return createHmac("sha256", key).update(value, "utf8").digest();
 }
 
 function canonicalQuery(entries: Array<[string, string]>) {
@@ -93,13 +80,13 @@ export async function createR2PresignedUrl(options: PresignOptions) {
   ]);
 
   const canonicalRequest = `${method}\n${canonicalUri}\n${query}\n${canonicalHeaders}${signedHeaders}\nUNSIGNED-PAYLOAD`;
-  const stringToSign = `AWS4-HMAC-SHA256\n${amzDate}\n${scope}\n${await sha256(canonicalRequest)}`;
+  const stringToSign = `AWS4-HMAC-SHA256\n${amzDate}\n${scope}\n${sha256(canonicalRequest)}`;
 
-  const dateKey = await hmac(encoder.encode(`AWS4${secretAccessKey}`), dateStamp);
-  const regionKey = await hmac(dateKey, region);
-  const serviceKey = await hmac(regionKey, service);
-  const signingKey = await hmac(serviceKey, "aws4_request");
-  const signature = hex(await hmac(signingKey, stringToSign));
+  const dateKey = hmac(`AWS4${secretAccessKey}`, dateStamp);
+  const regionKey = hmac(dateKey, region);
+  const serviceKey = hmac(regionKey, service);
+  const signingKey = hmac(serviceKey, "aws4_request");
+  const signature = hmac(signingKey, stringToSign).toString("hex");
 
   return `https://${host}${canonicalUri}?${query}&X-Amz-Signature=${signature}`;
 }
