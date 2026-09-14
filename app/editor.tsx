@@ -183,14 +183,16 @@ export default function Editor() {
     label: batchBusy ? `${batchDone} of ${batchItems.length} completed${batchFailed ? ` · ${batchFailed} failed` : ""}` : batchDone === batchItems.length ? `All ${batchDone} images completed` : `${batchDone} completed${batchFailed ? ` · ${batchFailed} failed` : ""}`,
   } : { percent: 0, label: "", state: "idle" };
 
-  function addHistory(url: string, prompt: string) {
+  function addHistory(url: string, prompt: string, incrementGenerationCount = true) {
     const item = { url, prompt, createdAt: new Date().toISOString() };
     setHistory((current) => {
       const next = [item, ...current];
       localStorage.setItem("pixora-history", JSON.stringify(next));
       return next;
     });
-    setTotalGenerated((current) => current === null ? current : current + 1);
+    if (incrementGenerationCount) {
+      setTotalGenerated((current) => current === null ? current : current + 1);
+    }
   }
 
   async function uploadImage(image: File, onProgress?: (percentage: number) => void) {
@@ -372,12 +374,20 @@ export default function Editor() {
         try {
           const output = await pollTask(task.taskId, (status) => updateBatchItem(source.id, { progress: taskPercent(status), label: status.replace(/_/g, " "), status: "processing" }));
           updateBatchItem(source.id, { result: output, progress: 100, label: "Completed", status: "done" });
-          addHistory(output, batchPrompt.trim());
+          addHistory(output, batchPrompt.trim(), false);
         } catch (error) {
           const detail = error instanceof Error ? error.message : "Generation failed";
           updateBatchItem(source.id, { progress: 100, label: detail, status: "failed", error: detail });
         }
       }));
+
+      try {
+        const statsResponse = await fetch("/api/stats", { cache: "no-store" });
+        const stats = await statsResponse.json() as { totalGenerated?: number };
+        if (statsResponse.ok && typeof stats.totalGenerated === "number") setTotalGenerated(stats.totalGenerated);
+      } catch {
+        // The batch results are already complete; a stats refresh failure should not fail the batch.
+      }
     } catch (error) {
       setBatchMessage(error instanceof Error ? error.message : "Batch generation failed");
     } finally { setBatchBusy(false); }
