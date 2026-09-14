@@ -1,5 +1,11 @@
 .adminCard{width:min(100%,640px)}
 .passwordManagerUser{position:absolute!important;width:1px!important;height:1px!important;opacity:0!important;pointer-events:none!important;overflow:hidden!important;padding:0!important;border:0!important}
+.apiAddActions{display:grid;grid-template-columns:1fr 1fr;gap:9px;margin-top:9px}
+.apiAddActions button,.vercelApiAction{min-height:48px;border-radius:10px;font-weight:800;cursor:pointer}
+.apiAddActions button:first-child{border:0;background:var(--lime);color:#162012}
+.apiAddActions .secondaryApiAction{border:1px solid #575d50;background:#2f342b;color:#f5f5ee}
+.apiAddActions button:disabled,.vercelApiAction:disabled{opacity:.5;cursor:not-allowed}
+.vercelApiAction{width:100%;margin-top:0!important;border:1px solid #4b5046!important;background:transparent!important;color:#c6cabf!important}
 .apiRotation{margin-top:22px;padding-top:20px;border-top:1px solid #3a3c36}
 .apiRotationHead{display:flex;align-items:center;justify-content:space-between;gap:14px;margin-bottom:12px}
 .apiRotationHead h2{margin:0;font:750 17px var(--font-manrope);letter-spacing:-.025em}
@@ -25,4 +31,4 @@
 .useApi:hover:not(:disabled){border-color:#879c52;color:var(--lime)}
 .useApi:disabled{opacity:.5;cursor:wait}
 .emptyApis{margin:0;padding:15px;border:1px dashed #44483e;border-radius:11px;color:#8e9289;text-align:center;font-size:10px}
-@media(max-width:600px){.adminCard{padding:20px}.apiList article{align-items:flex-start;flex-wrap:wrap}.apiDetails{min-width:calc(100% - 42px)}.useApi{margin-left:38px}.apiLine{align-items:flex-start;flex-direction:column;gap:5px}.apiRotationHead{align-items:flex-start}}
+@media(max-width:600px){.adminCard{padding:20px}.apiAddActions{grid-template-columns:1fr}.apiList article{align-items:flex-start;flex-wrap:wrap}.apiDetails{min-width:calc(100% - 42px)}.useApi{margin-left:38px}.apiLine{align-items:flex-start;flex-direction:column;gap:5px}.apiRotationHead{align-items:flex-start}}
