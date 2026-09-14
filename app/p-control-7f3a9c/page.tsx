@@ -23,6 +23,7 @@ type TokenInfo = {
 type TokenResponse = TokenInfo & {
   error?: string;
   added?: boolean;
+  activated?: boolean;
   activatedVercel?: boolean;
 };
 
@@ -61,29 +62,50 @@ export default function CredentialControl() {
     setPassword("");
   }
 
-  async function updateToken(event: FormEvent) {
-    event.preventDefault();
+  async function saveApi(mode: "queue" | "activate") {
+    const nextToken = token.trim();
+    if (!nextToken) {
+      setMessage("Paste a VModel API key first.");
+      return;
+    }
+
     setBusy(true);
     setMessage("");
-    const addingToken = token.trim();
     const response = await fetch("/api/admin/token", {
       method: "PUT",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ token: addingToken }),
+      body: JSON.stringify({ token: nextToken, activate: mode === "activate" }),
     });
     const data = await response.json() as TokenResponse;
     setBusy(false);
     if (!response.ok) return setMessage(data.error || "Could not update the API rotation.");
+
     setToken("");
     setInfo(data);
-
-    if (!addingToken) {
-      setMessage("Vercel API selected. If it has reached 300 generations, Pixora will automatically move to the next usable API.");
-    } else if (data.added) {
-      setMessage("API added to the rotation queue. Pixora will switch to it automatically when the active API reaches 300 generations.");
+    if (mode === "activate") {
+      setMessage(data.added
+        ? "API saved and activated. New generation requests will use it immediately."
+        : "Saved API activated. New generation requests will use it immediately.");
     } else {
-      setMessage("That API is already saved in the rotation list.");
+      setMessage(data.added
+        ? "API added to Queue. The current API stays active until it reaches 300 generations or you choose Use now."
+        : "That API is already saved. Its existing position and generation count were kept.");
     }
+  }
+
+  async function activateVercelApi() {
+    setBusy(true);
+    setMessage("");
+    const response = await fetch("/api/admin/token", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ token: "" }),
+    });
+    const data = await response.json() as TokenResponse;
+    setBusy(false);
+    if (!response.ok) return setMessage(data.error || "Could not activate the Vercel API.");
+    setInfo(data);
+    setMessage("Vercel API selected. New generation requests will use it immediately.");
   }
 
   async function activateApi(fingerprint: string) {
@@ -116,15 +138,19 @@ export default function CredentialControl() {
       <button type="submit" disabled={busy}>{busy ? "Checking…" : "Unlock"}</button>
       <small>Your browser can save this login and autofill it next time.</small>
     </form> : <>
-      <form onSubmit={updateToken}>
+      <form onSubmit={(event) => { event.preventDefault(); void saveApi("queue"); }}>
         <h1>VModel API rotation</h1>
         <p className="tokenStatus"><span className={info?.configured ? "online" : ""} />{info?.configured ? `Connected via ${info.source}` : "Not configured"}</p>
         <label>Currently active</label>
         <div className="maskedToken">{info?.masked || "No key configured"}</div>
-        <label htmlFor="new-token">Add next API</label>
+        <label htmlFor="new-token">Add another API</label>
         <input id="new-token" name="vmodel-api-key" type="password" value={token} onChange={(event) => setToken(event.target.value)} autoComplete="off" placeholder="Paste another VModel API key" />
-        <button type="submit" disabled={busy}>{busy ? "Saving…" : token.trim() ? "Add API to rotation" : "Use Vercel API key"}</button>
-        <small>Added APIs are kept securely and queued. Pixora automatically moves to the next usable API at {generationLimit} successful generations.</small>
+        <div className="apiAddActions">
+          <button type="submit" disabled={busy || !token.trim()}>{busy ? "Saving…" : "Add to Queue"}</button>
+          <button type="button" className="secondaryApiAction" disabled={busy || !token.trim()} onClick={() => void saveApi("activate")}>{busy ? "Saving…" : "Use Now"}</button>
+        </div>
+        <button type="button" className="vercelApiAction" disabled={busy} onClick={() => void activateVercelApi()}>Use Vercel API key</button>
+        <small><b>Add to Queue</b> keeps the current API active. <b>Use Now</b> saves the pasted API and switches to it immediately. Pixora automatically moves to the next queued API when the current one reaches {generationLimit} successful generations.</small>
       </form>
 
       <section className="apiRotation" aria-label="Saved VModel API rotation">
