@@ -31,6 +31,61 @@ function stageState(currentRank, stageRank) {
   return "waiting";
 }
 
+function isActivePhase(phase) {
+  return ["upload", "prepare", "generate", "finalizing"].includes(phase);
+}
+
+function outputPercent(state) {
+  if (typeof state.percent === "number") return Math.max(0, Math.min(100, state.percent));
+  if (state.phase === "generate" && state.sourceCount > 0) {
+    return Math.max(0, Math.min(100, ((state.delivered + state.failed) / state.sourceCount) * 100));
+  }
+  return 0;
+}
+
+function shortStage(state) {
+  const percent = Math.round(outputPercent(state));
+  if (state.phase === "upload") return `Uploading originals · ${percent}%`;
+  if (state.phase === "prepare") return `Building smart batches · ${percent}%`;
+  if (state.phase === "generate") return `V-Editor generating · ${state.delivered}/${state.sourceCount || 0} ready`;
+  if (state.phase === "finalizing") return `Splitting & saving · ${state.delivered}/${state.sourceCount || 0}`;
+  if (state.phase === "complete") return "Batch complete";
+  if (state.phase === "error") return "Batch processing error";
+  return "Processing batch";
+}
+
+function syncInlineBatchUi(state) {
+  if (typeof document === "undefined") return;
+  const active = isActivePhase(state.phase);
+  const button = document.querySelector(".batchWorkspace .controls .generate");
+  const progress = document.querySelector(".batchWorkspace .controls .progressBox");
+
+  if (active && button) {
+    const wanted = shortStage(state);
+    const currentText = (button.textContent || "").replace(/\s+/g, " ").trim();
+    if (currentText !== wanted) {
+      button.replaceChildren();
+      const spinner = document.createElement("span");
+      spinner.className = "spinner";
+      button.append(spinner, document.createTextNode(` ${wanted}`));
+    }
+  }
+
+  if (active && progress) {
+    const label = progress.querySelector(".progressTop span");
+    const value = progress.querySelector(".progressTop strong");
+    const fill = progress.querySelector(".progressTrack i");
+    const percent = outputPercent(state);
+    const exact = state.detail || state.title || shortStage(state);
+    if (label && label.textContent !== exact) label.textContent = exact;
+    if (value) {
+      const valueText = state.phase === "generate" ? `${state.delivered}/${state.sourceCount || 0}` : `${Math.round(percent)}%`;
+      if (value.textContent !== valueText) value.textContent = valueText;
+    }
+    if (fill) fill.style.width = `${percent}%`;
+  }
+}
+
 export default function BatchProcessingProgress() {
   const [state, setState] = useState({
     visible: false,
@@ -52,9 +107,13 @@ export default function BatchProcessingProgress() {
   const dismissedRef = useRef(false);
 
   const update = (patch, force = false) => {
-    if (!force && patch?.visible && dismissedRef.current) return;
     setState((current) => {
-      const next = { ...current, ...patch };
+      const requested = { ...current, ...patch };
+      // Closing the floating card only hides that card. Live progress must keep updating so the
+      // inline Batch UI and the minimized reopen chip always know the real current stage.
+      const next = (!force && dismissedRef.current && patch?.visible)
+        ? { ...requested, visible: false }
+        : requested;
       phaseRef.current = next.phase;
       sourceCountRef.current = next.sourceCount || sourceCountRef.current;
       requestCountRef.current = next.requestCount || requestCountRef.current;
@@ -70,10 +129,21 @@ export default function BatchProcessingProgress() {
   };
 
   useEffect(() => {
+    syncInlineBatchUi(state);
+    const raf = window.requestAnimationFrame(() => syncInlineBatchUi(state));
+    const retry = window.setTimeout(() => syncInlineBatchUi(state), 80);
+    const interval = isActivePhase(state.phase) ? window.setInterval(() => syncInlineBatchUi(state), 450) : null;
+    return () => {
+      window.cancelAnimationFrame(raf);
+      window.clearTimeout(retry);
+      if (interval !== null) window.clearInterval(interval);
+    };
+  }, [state.phase, state.title, state.detail, state.percent, state.sourceCount, state.delivered, state.failed]);
+
+  useEffect(() => {
     const originalFetch = window.fetch.bind(window);
 
     const onPairProgress = (event) => {
-      if (dismissedRef.current) return;
       const detail = event?.detail || {};
       const percent = Number(detail.percent);
       update({
@@ -142,9 +212,6 @@ export default function BatchProcessingProgress() {
         failedTaskIds.current.clear();
         if (hideTimer.current) window.clearTimeout(hideTimer.current);
 
-        // A POST entered from the upload phase belongs to the same batch. If the user already
-        // closed the floating card, keep it closed. Otherwise a completed/idle previous batch
-        // starts a fresh visible progress card.
         if (!["upload", "prepare", "generate", "finalizing"].includes(phaseRef.current)) dismissedRef.current = false;
 
         update({
@@ -178,7 +245,7 @@ export default function BatchProcessingProgress() {
               visible: true,
               phase: "generate",
               title: "V-Editor generation started",
-              detail: `${realRequests} real VModel generation request${realRequests === 1 ? "" : "s"} accepted. Paired requests use maximum result resolution.`,
+              detail: `${realRequests} VModel request${realRequests === 1 ? "" : "s"} running · ${sourceCount} final images expected. Completed outputs will update here live.`,
               percent: null,
               sourceCount,
               requestCount: realRequests,
@@ -235,19 +302,23 @@ export default function BatchProcessingProgress() {
               title: finished >= total ? "Batch processing complete" : "AI result received · splitting & saving",
               detail: finished >= total
                 ? `${delivered} final image${delivered === 1 ? "" : "s"} ready${failed ? ` · ${failed} failed` : ""}.`
-                : `Paired AI output has been separated and saved as PNG · ${delivered}/${total}`,
+                : `Splitting and saving finished V-Editor output as PNG · ${delivered}/${total} final images ready`,
               percent: total ? (finished / total) * 100 : 100,
               delivered,
               failed,
             });
             if (finished >= total) hideAfterComplete();
           } else {
+            const delivered = completedTaskIds.current.size;
+            const failed = failedTaskIds.current.size;
             update({
               visible: true,
               phase: "generate",
               title: `V-Editor ${status}`,
-              detail: `${requestCountRef.current || Math.ceil((sourceCountRef.current || 1) / 2)} real generation request${(requestCountRef.current || 1) === 1 ? "" : "s"} · waiting for VModel to finish.`,
+              detail: `${requestCountRef.current || Math.ceil((sourceCountRef.current || 1) / 2)} VModel request${(requestCountRef.current || 1) === 1 ? "" : "s"} running · ${delivered}/${sourceCountRef.current || 0} final images ready${failed ? ` · ${failed} failed` : ""}`,
               percent: null,
+              delivered,
+              failed,
             });
           }
         } catch {
@@ -270,6 +341,31 @@ export default function BatchProcessingProgress() {
     };
   }, []);
 
+  const active = isActivePhase(state.phase);
+  const minimized = !state.visible && dismissedRef.current && active;
+
+  const reopenProgress = () => {
+    dismissedRef.current = false;
+    setState((current) => ({ ...current, visible: true }));
+  };
+
+  const closeProgress = () => {
+    dismissedRef.current = true;
+    if (hideTimer.current) window.clearTimeout(hideTimer.current);
+    setState((current) => ({ ...current, visible: false }));
+  };
+
+  if (minimized) {
+    return <>
+      <style>{`
+        .pxBatchMini{position:fixed;z-index:9000;right:16px;bottom:16px;display:flex;align-items:center;gap:9px;max-width:min(340px,calc(100vw - 32px));padding:10px 13px;border:1px solid rgba(126,150,60,.55);border-radius:999px;background:rgba(23,61,45,.96);box-shadow:0 14px 38px rgba(20,24,19,.24);color:#f5f7ef;font:750 11px var(--font-manrope),Arial,sans-serif;cursor:pointer;backdrop-filter:blur(10px)}
+        .pxBatchMini i{width:8px;height:8px;flex:0 0 auto;border-radius:50%;background:#c6f04a;box-shadow:0 0 0 4px rgba(198,240,74,.13);animation:pxMiniPulse 1.25s ease-in-out infinite}.pxBatchMini b{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.pxBatchMini span{color:#d8ed9b;font-size:13px}@keyframes pxMiniPulse{50%{opacity:.45;transform:scale(.82)}}
+        @media(max-width:620px){.pxBatchMini{right:12px;bottom:12px;max-width:calc(100vw - 24px)}}
+      `}</style>
+      <button type="button" className="pxBatchMini" onClick={reopenProgress} aria-label="Reopen live batch progress"><i /><b>{shortStage(state)}</b><span>↑</span></button>
+    </>;
+  }
+
   if (!state.visible) return null;
 
   const rank = PHASE_RANK[state.phase] || 0;
@@ -281,12 +377,6 @@ export default function BatchProcessingProgress() {
     { label: "V-Editor generation", rank: 3 },
     { label: "Split & save outputs", rank: 4 },
   ];
-
-  const closeProgress = () => {
-    dismissedRef.current = true;
-    if (hideTimer.current) window.clearTimeout(hideTimer.current);
-    setState((current) => ({ ...current, visible: false }));
-  };
 
   return <div className={`pxBatchProgress ${state.phase}`} role="status" aria-live="polite">
     <style>{`
@@ -301,7 +391,7 @@ export default function BatchProcessingProgress() {
       <div><small>LIVE BATCH PROCESSING</small><strong>{state.title}</strong></div>
       <div className="pxBatchHeadActions">
         {state.requestCount > 0 && <span className="pxBatchRequest">{state.requestCount} VModel request{state.requestCount === 1 ? "" : "s"}</span>}
-        <button type="button" className="pxBatchClose" onClick={closeProgress} aria-label="Close batch progress">×</button>
+        <button type="button" className="pxBatchClose" onClick={closeProgress} aria-label="Minimize batch progress">×</button>
       </div>
     </div>
     <p className="pxBatchDetail">{state.detail}</p>
