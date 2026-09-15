@@ -4,6 +4,7 @@ import { useEffect } from "react";
 import { upload, uploadResult } from "../lib/imagekit-upload-client";
 
 type NormalizedCrop = { x: number; y: number; width: number; height: number };
+type Panel = { left: number; top: number; width: number; height: number };
 type BatchPayload = {
   imageUrls?: string[];
   prompt?: string;
@@ -28,10 +29,14 @@ type SyntheticTask = {
 type TaskPoll = { status?: string; output?: string[]; error?: string };
 
 const PAIR_PREFIX = "pxpair_";
-const GUTTER = 36;
-const TARGET_SIDE = 1024;
+const SEAM = 8;
+const TARGET_SIDE = 1400;
 const MAX_CANVAS_SIDE = 3072;
-const BATCH_DIRECTIVE = "BATCH GRID: Treat the two image panels as fully independent photos. Apply the edit separately to both. Never merge, mix, copy, or move content between panels. Keep the divider and panel boundaries fixed. If a panel has padding only to preserve the full source at the requested ratio, extend that same photo naturally into the padding.";
+const FACE_LOCK_MARKER = "Preserve the exact facial identity";
+const POSE_LOCK_MARKER = "Preserve the exact body pose";
+const BATCH_DIRECTIVE = "BATCH COLLAGE: The input is a simple two-panel collage made from two separate source photos. The user's instruction above is the primary edit request. Treat each panel as an independent image and apply that same requested edit separately to each panel. Never merge, blend, swap, copy, or transfer faces, identities, hair, bodies, clothes, poses, backgrounds, or objects between panels. Keep each subject in its own panel. Do not invent a third person. Keep the panel boundary stable. If neutral padding exists only to preserve a requested output ratio, extend that panel's own photo naturally into its padding without borrowing content from the other panel.";
+const FACE_PANEL_DIRECTIVE = "FACE LOCK FOR COLLAGE: For each panel independently, preserve that panel's original person's recognizable identity with very high priority. Keep facial structure, eyes, nose, lips, skin tone, age appearance, hairstyle, hairline, and other unique identity features consistent. Never use the face or identity from the other panel.";
+const POSE_PANEL_DIRECTIVE = "POSE LOCK FOR COLLAGE: For each panel independently, preserve that panel's original head angle, body pose, limb positions, gaze direction, camera angle, crop, framing, and composition unless the user's primary edit explicitly makes a small change unavoidable. Never copy the pose from the other panel.";
 
 function requestUrl(input: RequestInfo | URL) {
   if (typeof input === "string") return input;
@@ -66,7 +71,7 @@ async function fetchBitmap(url: string, originalFetch: typeof window.fetch) {
   return createImageBitmap(blob);
 }
 
-function scaleLayout(width: number, height: number, panels: Array<{ left: number; top: number; width: number; height: number }>) {
+function scaleLayout(width: number, height: number, panels: Panel[]) {
   const scale = Math.min(1, MAX_CANVAS_SIDE / Math.max(width, height));
   if (scale === 1) return { width, height, panels };
   return {
@@ -81,90 +86,119 @@ function scaleLayout(width: number, height: number, panels: Array<{ left: number
   };
 }
 
-function choosePanels(aRatio: number, bRatio: number, targetRatio: number | null) {
-  if (targetRatio) {
-    if (targetRatio <= 1) {
-      const height = TARGET_SIDE;
-      const width = Math.max(1, Math.round(height * targetRatio));
-      return scaleLayout(width * 2 + GUTTER, height, [
-        { left: 0, top: 0, width, height },
-        { left: width + GUTTER, top: 0, width, height },
-      ]);
-    }
-    const width = TARGET_SIDE;
-    const height = Math.max(1, Math.round(width / targetRatio));
-    return scaleLayout(width, height * 2 + GUTTER, [
-      { left: 0, top: 0, width, height },
-      { left: 0, top: height + GUTTER, width, height },
-    ]);
-  }
+function naturalLayout(a: ImageBitmap, b: ImageBitmap) {
+  const aRatio = a.width / a.height;
+  const bRatio = b.width / b.height;
 
-  const horizontalHeight = TARGET_SIDE;
-  const horizontalA = Math.max(1, Math.round(horizontalHeight * aRatio));
-  const horizontalB = Math.max(1, Math.round(horizontalHeight * bRatio));
-  const horizontalWidth = horizontalA + GUTTER + horizontalB;
-  const horizontalScore = Math.abs(Math.log(horizontalWidth / horizontalHeight));
+  // Side-by-side candidate: scale both proportionally to one shared height.
+  // We never enlarge a source just to make the collage, which avoids needless interpolation.
+  const sharedHeight = Math.max(1, Math.min(TARGET_SIDE, a.height, b.height));
+  const horizontalAWidth = Math.max(1, Math.round(sharedHeight * aRatio));
+  const horizontalBWidth = Math.max(1, Math.round(sharedHeight * bRatio));
+  const horizontalWidth = horizontalAWidth + SEAM + horizontalBWidth;
+  const horizontalScore = Math.abs(Math.log(horizontalWidth / sharedHeight));
 
-  const verticalWidth = TARGET_SIDE;
-  const verticalA = Math.max(1, Math.round(verticalWidth / aRatio));
-  const verticalB = Math.max(1, Math.round(verticalWidth / bRatio));
-  const verticalHeight = verticalA + GUTTER + verticalB;
-  const verticalScore = Math.abs(Math.log(verticalWidth / verticalHeight));
+  // Top/bottom candidate: scale both proportionally to one shared width.
+  const sharedWidth = Math.max(1, Math.min(TARGET_SIDE, a.width, b.width));
+  const verticalAHeight = Math.max(1, Math.round(sharedWidth / aRatio));
+  const verticalBHeight = Math.max(1, Math.round(sharedWidth / bRatio));
+  const verticalHeight = verticalAHeight + SEAM + verticalBHeight;
+  const verticalScore = Math.abs(Math.log(sharedWidth / verticalHeight));
 
   if (horizontalScore <= verticalScore) {
-    return scaleLayout(horizontalWidth, horizontalHeight, [
-      { left: 0, top: 0, width: horizontalA, height: horizontalHeight },
-      { left: horizontalA + GUTTER, top: 0, width: horizontalB, height: horizontalHeight },
+    return scaleLayout(horizontalWidth, sharedHeight, [
+      { left: 0, top: 0, width: horizontalAWidth, height: sharedHeight },
+      { left: horizontalAWidth + SEAM, top: 0, width: horizontalBWidth, height: sharedHeight },
     ]);
   }
-  return scaleLayout(verticalWidth, verticalHeight, [
-    { left: 0, top: 0, width: verticalWidth, height: verticalA },
-    { left: 0, top: verticalA + GUTTER, width: verticalWidth, height: verticalB },
+
+  return scaleLayout(sharedWidth, verticalHeight, [
+    { left: 0, top: 0, width: sharedWidth, height: verticalAHeight },
+    { left: 0, top: verticalAHeight + SEAM, width: sharedWidth, height: verticalBHeight },
   ]);
 }
 
-function drawContained(context: CanvasRenderingContext2D, bitmap: ImageBitmap, panel: { left: number; top: number; width: number; height: number }) {
-  context.fillStyle = "#f4f4f2";
+function requestedRatioLayout(targetRatio: number) {
+  // When the user explicitly chooses an output ratio, each panel must have that ratio so
+  // the final split images keep the requested shape. Sources are contained without cropping.
+  if (targetRatio <= 1) {
+    const height = TARGET_SIDE;
+    const width = Math.max(1, Math.round(height * targetRatio));
+    return scaleLayout(width * 2 + SEAM, height, [
+      { left: 0, top: 0, width, height },
+      { left: width + SEAM, top: 0, width, height },
+    ]);
+  }
+
+  const width = TARGET_SIDE;
+  const height = Math.max(1, Math.round(width / targetRatio));
+  return scaleLayout(width, height * 2 + SEAM, [
+    { left: 0, top: 0, width, height },
+    { left: 0, top: height + SEAM, width, height },
+  ]);
+}
+
+function choosePanels(a: ImageBitmap, b: ImageBitmap, targetRatio: number | null) {
+  return targetRatio ? requestedRatioLayout(targetRatio) : naturalLayout(a, b);
+}
+
+function drawContained(context: CanvasRenderingContext2D, bitmap: ImageBitmap, panel: Panel) {
+  context.fillStyle = "#ffffff";
   context.fillRect(panel.left, panel.top, panel.width, panel.height);
+
   const sourceRatio = bitmap.width / bitmap.height;
   const panelRatio = panel.width / panel.height;
   let width = panel.width;
   let height = panel.height;
   if (sourceRatio > panelRatio) height = width / sourceRatio;
   else width = height * sourceRatio;
+
   const left = panel.left + (panel.width - width) / 2;
   const top = panel.top + (panel.height - height) / 2;
   context.drawImage(bitmap, left, top, width, height);
 }
 
+function buildPairPrompt(prompt: string) {
+  const base = prompt.trim();
+  const additions = [BATCH_DIRECTIVE];
+  if (base.includes(FACE_LOCK_MARKER)) additions.push(FACE_PANEL_DIRECTIVE);
+  if (base.includes(POSE_LOCK_MARKER)) additions.push(POSE_PANEL_DIRECTIVE);
+  return `${base}\n\n${additions.join("\n\n")}`;
+}
+
 async function makeComposite(urlA: string, urlB: string, ratio: string, originalFetch: typeof window.fetch) {
   const [a, b] = await Promise.all([fetchBitmap(urlA, originalFetch), fetchBitmap(urlB, originalFetch)]);
   try {
-    const layout = choosePanels(a.width / a.height, b.width / b.height, parseRatio(ratio));
+    const layout = choosePanels(a, b, parseRatio(ratio));
     const canvas = document.createElement("canvas");
     canvas.width = layout.width;
     canvas.height = layout.height;
     const context = canvas.getContext("2d");
     if (!context) throw new Error("Canvas is not available in this browser.");
 
-    context.fillStyle = "#d9d9d5";
+    // This is intentionally only normal canvas compositing: no face detection, enhancement,
+    // alignment, segmentation, AI preprocessing, crop-normalisation, or smart retouching.
+    context.imageSmoothingEnabled = true;
+    context.imageSmoothingQuality = "high";
+    context.fillStyle = "#ffffff";
     context.fillRect(0, 0, canvas.width, canvas.height);
     drawContained(context, a, layout.panels[0]);
     drawContained(context, b, layout.panels[1]);
 
+    // Keep only a very small neutral seam so V-Editor can distinguish the two photos without
+    // adding a heavy divider that could become part of the generated image.
     const first = layout.panels[0];
     const second = layout.panels[1];
-    context.fillStyle = "#111111";
+    context.fillStyle = "#ffffff";
     if (first.top === second.top) {
-      const x = first.left + first.width + Math.floor((second.left - first.left - first.width) / 2);
-      context.fillRect(Math.max(0, x - 2), 0, 4, canvas.height);
+      context.fillRect(first.left + first.width, 0, Math.max(1, second.left - first.left - first.width), canvas.height);
     } else {
-      const y = first.top + first.height + Math.floor((second.top - first.top - first.height) / 2);
-      context.fillRect(0, Math.max(0, y - 2), canvas.width, 4);
+      context.fillRect(0, first.top + first.height, canvas.width, Math.max(1, second.top - first.top - first.height));
     }
 
-    const blob = await canvasBlob(canvas, "image/jpeg", 0.94);
-    const file = new File([blob], `pixora-pair-${crypto.randomUUID()}.jpg`, { type: "image/jpeg" });
+    // PNG avoids the extra JPEG compression pass that previously happened before V-Editor.
+    const blob = await canvasBlob(canvas, "image/png");
+    const file = new File([blob], `pixora-pair-${crypto.randomUUID()}.png`, { type: "image/png" });
     const uploaded = await upload(`pixora-inputs/pairs/${Date.now()}-${file.name}`, file, { access: "public" });
     return {
       imageUrl: uploaded.url,
@@ -194,6 +228,8 @@ async function splitAndPersist(outputUrl: string, crops: NormalizedCrop[], pairK
       canvas.height = sh;
       const context = canvas.getContext("2d");
       if (!context) throw new Error("Canvas is not available in this browser.");
+      context.imageSmoothingEnabled = true;
+      context.imageSmoothingQuality = "high";
       context.drawImage(bitmap, sx, sy, sw, sh, 0, 0, sw, sh);
       const blob = await canvasBlob(canvas, "image/png");
       const file = new File([blob], `pixora-${pairKey}-${panelIndex + 1}.png`, { type: "image/png" });
@@ -268,7 +304,7 @@ export default function BatchPairBridge() {
               crops: composite.crops,
               aspectRatio: "default",
               resultResolution: 1,
-              prompt: `${BATCH_DIRECTIVE}\n\n${payload.prompt!.trim()}`,
+              prompt: buildPairPrompt(payload.prompt!),
             };
           } catch (error) {
             return {
@@ -385,12 +421,12 @@ export default function BatchPairBridge() {
 
     const updateBatchCopy = () => {
       document.querySelectorAll<HTMLElement>(".fineprint").forEach((node) => {
-        if (node.textContent?.includes("Each image is a separate V-Editor request")) {
-          node.textContent = "Smart pairing uses 1 V-Editor request for every 2 batch images · 50 images = 25 API requests.";
+        if (node.textContent?.includes("Each image is a separate V-Editor request") || node.textContent?.includes("Smart pairing uses")) {
+          node.textContent = "Lossless smart pairing uses 1 V-Editor request for every 2 batch images · 50 images = 25 API requests.";
         }
       });
       document.querySelectorAll<HTMLElement>(".privacy").forEach((node) => {
-        if (node.textContent?.includes("One prompt, separate generations")) node.textContent = "◆ One prompt, smart paired processing";
+        if (node.textContent?.includes("One prompt, separate generations") || node.textContent?.includes("One prompt, smart paired processing")) node.textContent = "◆ One prompt, lossless paired processing";
       });
     };
     updateBatchCopy();
