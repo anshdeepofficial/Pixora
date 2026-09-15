@@ -27,6 +27,7 @@ type SyntheticTask = {
   crop: NormalizedCrop;
   panelIndex: number;
   pairKey: string;
+  createdAt: number;
 };
 type TaskPoll = { status?: string; output?: string[]; error?: string };
 
@@ -37,6 +38,9 @@ type PairProgress = {
 
 const PAIR_PREFIX = "pxpair_";
 const PAIR_PROGRESS_EVENT = "pixora:batch-pair-progress";
+const SYNTHETIC_TASK_KEY = "pixora-synthetic-pair-tasks-v1";
+const BRIDGE_BATCH_KEY = "pixora-bridge-last-batch-v1";
+const SYNTHETIC_TTL = 24 * 60 * 60 * 1000;
 const SEAM = 8;
 // 3072 is large enough to keep two typical 1080p sources at or near their native pixel size,
 // while keeping PNG encoding/upload memory reasonable on mobile browsers.
@@ -68,6 +72,39 @@ function parseRatio(value?: string) {
 
 function emitPairProgress(progress: PairProgress) {
   window.dispatchEvent(new CustomEvent<PairProgress>(PAIR_PROGRESS_EVENT, { detail: progress }));
+}
+
+function restoreSyntheticTasks() {
+  const map = new Map<string, SyntheticTask>();
+  try {
+    const raw = JSON.parse(localStorage.getItem(SYNTHETIC_TASK_KEY) || "[]") as Array<[string, SyntheticTask]>;
+    const cutoff = Date.now() - SYNTHETIC_TTL;
+    for (const entry of Array.isArray(raw) ? raw : []) {
+      const [id, task] = entry || [];
+      if (!id?.startsWith(PAIR_PREFIX) || !task?.realTaskId || !task?.crop || Number(task.createdAt || 0) < cutoff) continue;
+      map.set(id, task);
+    }
+  } catch {}
+  return map;
+}
+
+function persistSyntheticTasks(tasks: Map<string, SyntheticTask>) {
+  try {
+    localStorage.setItem(SYNTHETIC_TASK_KEY, JSON.stringify(Array.from(tasks.entries())));
+  } catch {}
+}
+
+function persistBridgeBatch(sourceImageUrls: string[], payload: BatchPayload, tasks: BatchTask[], requestCount: number) {
+  try {
+    localStorage.setItem(BRIDGE_BATCH_KEY, JSON.stringify({
+      at: Date.now(),
+      sourceImageUrls,
+      prompt: payload.prompt || "",
+      aspectRatio: payload.aspectRatio || "default",
+      tasks,
+      vmodelRequestCount: requestCount,
+    }));
+  } catch {}
 }
 
 function canvasBlob(canvas: HTMLCanvasElement, type: string, quality?: number) {
@@ -304,7 +341,8 @@ async function mapLimit<T, R>(items: T[], limit: number, worker: (item: T, index
 export default function BatchPairBridge() {
   useEffect(() => {
     const originalFetch = window.fetch.bind(window);
-    const syntheticTasks = new Map<string, SyntheticTask>();
+    const syntheticTasks = restoreSyntheticTasks();
+    persistSyntheticTasks(syntheticTasks);
     const splitPromises = new Map<string, Promise<string[]>>();
     const pollCache = new Map<string, { at: number; data: TaskPoll; ok: boolean; status: number }>();
 
@@ -397,6 +435,8 @@ export default function BatchPairBridge() {
           : []);
 
         if (!submittedGroups.length) {
+          expandedTasks.sort((a, b) => a.index - b.index);
+          persistBridgeBatch(imageUrls, payload, expandedTasks, 0);
           return new Response(JSON.stringify({ tasks: expandedTasks, error: "Could not prepare any image pair." }), {
             status: 200,
             headers: { "Content-Type": "application/json", "Cache-Control": "no-store" },
@@ -433,12 +473,15 @@ export default function BatchPairBridge() {
               crop: group.crops[panelIndex],
               panelIndex,
               pairKey,
+              createdAt: Date.now(),
             });
             expandedTasks.push({ index: originalIndex, taskId: syntheticId });
           });
         }
 
+        persistSyntheticTasks(syntheticTasks);
         expandedTasks.sort((a, b) => a.index - b.index);
+        persistBridgeBatch(imageUrls, payload, expandedTasks, submittedGroups.length);
         return new Response(JSON.stringify({
           ...serverData,
           tasks: expandedTasks,
@@ -510,6 +553,7 @@ export default function BatchPairBridge() {
 
     return () => {
       observer.disconnect();
+      persistSyntheticTasks(syntheticTasks);
       if (window.fetch === patchedFetch) window.fetch = originalFetch;
     };
   }, []);
