@@ -5,6 +5,8 @@ import { upload, uploadResult } from "../lib/imagekit-upload-client";
 
 type NormalizedCrop = { x: number; y: number; width: number; height: number };
 type Panel = { left: number; top: number; width: number; height: number };
+type PanelSize = { width: number; height: number };
+type Layout = { width: number; height: number; panels: Panel[] };
 type BatchPayload = {
   imageUrls?: string[];
   prompt?: string;
@@ -16,7 +18,7 @@ type PreparedGroup = {
   imageUrl?: string;
   crops: NormalizedCrop[];
   aspectRatio: string;
-  resultResolution: 0 | 1;
+  resultResolution: 0 | 1 | 2;
   prompt: string;
   error?: string;
 };
@@ -28,10 +30,18 @@ type SyntheticTask = {
 };
 type TaskPoll = { status?: string; output?: string[]; error?: string };
 
+type PairProgress = {
+  percent: number;
+  detail: string;
+};
+
 const PAIR_PREFIX = "pxpair_";
+const PAIR_PROGRESS_EVENT = "pixora:batch-pair-progress";
 const SEAM = 8;
-const TARGET_SIDE = 1400;
+// 3072 is large enough to keep two typical 1080p sources at or near their native pixel size,
+// while keeping PNG encoding/upload memory reasonable on mobile browsers.
 const MAX_CANVAS_SIDE = 3072;
+const MAX_CANVAS_PIXELS = 8_500_000;
 const FACE_LOCK_MARKER = "Preserve the exact facial identity";
 const POSE_LOCK_MARKER = "Preserve the exact body pose";
 const BATCH_DIRECTIVE = "BATCH COLLAGE: The input is a simple two-panel collage made from two separate source photos. The user's instruction above is the primary edit request. Treat each panel as an independent image and apply that same requested edit separately to each panel. Never merge, blend, swap, copy, or transfer faces, identities, hair, bodies, clothes, poses, backgrounds, or objects between panels. Keep each subject in its own panel. Do not invent a third person. Keep the panel boundary stable. If neutral padding exists only to preserve a requested output ratio, extend that panel's own photo naturally into its padding without borrowing content from the other panel.";
@@ -56,14 +66,38 @@ function parseRatio(value?: string) {
   return Number.isFinite(w) && Number.isFinite(h) && w > 0 && h > 0 ? w / h : null;
 }
 
+function emitPairProgress(progress: PairProgress) {
+  window.dispatchEvent(new CustomEvent<PairProgress>(PAIR_PROGRESS_EVENT, { detail: progress }));
+}
+
 function canvasBlob(canvas: HTMLCanvasElement, type: string, quality?: number) {
   return new Promise<Blob>((resolve, reject) => {
     canvas.toBlob((blob) => blob ? resolve(blob) : reject(new Error("Could not encode the batch image.")), type, quality);
   });
 }
 
-async function fetchBitmap(url: string, originalFetch: typeof window.fetch) {
-  const params = new URLSearchParams({ url, filename: "pixora-pair-source", disposition: "inline" });
+function currentLocalPreviewUrls(expectedCount: number) {
+  const cards = Array.from(document.querySelectorAll<HTMLElement>(".batchCard"))
+    .filter((card) => !card.classList.contains("failed"));
+  return cards
+    .map((card) => card.querySelector<HTMLImageElement>(".batchThumb img")?.src || "")
+    .filter((source) => source.startsWith("blob:") || source.startsWith("data:"))
+    .slice(0, expectedCount);
+}
+
+async function fetchBitmap(source: string, originalFetch: typeof window.fetch) {
+  // Batch thumbnails point at the original local File via an object URL. Reading that object URL
+  // stays entirely inside the browser and avoids downloading an image we just uploaded.
+  if (source.startsWith("blob:") || source.startsWith("data:")) {
+    const response = await originalFetch(source);
+    if (!response.ok) throw new Error("Could not read the local batch source.");
+    const blob = await response.blob();
+    if (!blob.type.startsWith("image/")) throw new Error("A local batch source is not an image.");
+    return createImageBitmap(blob);
+  }
+
+  // Compatibility fallback if a local preview cannot be resolved.
+  const params = new URLSearchParams({ url: source, filename: "pixora-pair-source", disposition: "inline" });
   const response = await originalFetch(`/api/download?${params.toString()}`, { cache: "no-store" });
   if (!response.ok) throw new Error(`Could not read a batch source (${response.status}).`);
   const blob = await response.blob();
@@ -71,9 +105,15 @@ async function fetchBitmap(url: string, originalFetch: typeof window.fetch) {
   return createImageBitmap(blob);
 }
 
-function scaleLayout(width: number, height: number, panels: Panel[]) {
-  const scale = Math.min(1, MAX_CANVAS_SIDE / Math.max(width, height));
-  if (scale === 1) return { width, height, panels };
+function safeScale(width: number, height: number) {
+  const sideScale = MAX_CANVAS_SIDE / Math.max(width, height);
+  const pixelScale = Math.sqrt(MAX_CANVAS_PIXELS / Math.max(1, width * height));
+  return Math.min(1, sideScale, pixelScale);
+}
+
+function scaleLayout(width: number, height: number, panels: Panel[]): Layout {
+  const scale = safeScale(width, height);
+  if (scale >= 0.9999) return { width, height, panels };
   return {
     width: Math.max(1, Math.round(width * scale)),
     height: Math.max(1, Math.round(height * scale)),
@@ -86,60 +126,61 @@ function scaleLayout(width: number, height: number, panels: Panel[]) {
   };
 }
 
-function naturalLayout(a: ImageBitmap, b: ImageBitmap) {
-  const aRatio = a.width / a.height;
-  const bRatio = b.width / b.height;
-
-  // Side-by-side candidate: scale both proportionally to one shared height.
-  // We never enlarge a source just to make the collage, which avoids needless interpolation.
-  const sharedHeight = Math.max(1, Math.min(TARGET_SIDE, a.height, b.height));
-  const horizontalAWidth = Math.max(1, Math.round(sharedHeight * aRatio));
-  const horizontalBWidth = Math.max(1, Math.round(sharedHeight * bRatio));
-  const horizontalWidth = horizontalAWidth + SEAM + horizontalBWidth;
-  const horizontalScore = Math.abs(Math.log(horizontalWidth / sharedHeight));
-
-  // Top/bottom candidate: scale both proportionally to one shared width.
-  const sharedWidth = Math.max(1, Math.min(TARGET_SIDE, a.width, b.width));
-  const verticalAHeight = Math.max(1, Math.round(sharedWidth / aRatio));
-  const verticalBHeight = Math.max(1, Math.round(sharedWidth / bRatio));
-  const verticalHeight = verticalAHeight + SEAM + verticalBHeight;
-  const verticalScore = Math.abs(Math.log(sharedWidth / verticalHeight));
-
-  if (horizontalScore <= verticalScore) {
-    return scaleLayout(horizontalWidth, sharedHeight, [
-      { left: 0, top: 0, width: horizontalAWidth, height: sharedHeight },
-      { left: horizontalAWidth + SEAM, top: 0, width: horizontalBWidth, height: sharedHeight },
-    ]);
-  }
-
-  return scaleLayout(sharedWidth, verticalHeight, [
-    { left: 0, top: 0, width: sharedWidth, height: verticalAHeight },
-    { left: 0, top: verticalAHeight + SEAM, width: sharedWidth, height: verticalBHeight },
-  ]);
+function horizontalCandidate(a: PanelSize, b: PanelSize) {
+  const width = a.width + SEAM + b.width;
+  const height = Math.max(a.height, b.height);
+  return {
+    width,
+    height,
+    panels: [
+      { left: 0, top: Math.round((height - a.height) / 2), width: a.width, height: a.height },
+      { left: a.width + SEAM, top: Math.round((height - b.height) / 2), width: b.width, height: b.height },
+    ],
+  };
 }
 
-function requestedRatioLayout(targetRatio: number) {
-  // When the user explicitly chooses an output ratio, each panel must have that ratio so
-  // the final split images keep the requested shape. Sources are contained without cropping.
-  if (targetRatio <= 1) {
-    const height = TARGET_SIDE;
-    const width = Math.max(1, Math.round(height * targetRatio));
-    return scaleLayout(width * 2 + SEAM, height, [
-      { left: 0, top: 0, width, height },
-      { left: width + SEAM, top: 0, width, height },
-    ]);
-  }
+function verticalCandidate(a: PanelSize, b: PanelSize) {
+  const width = Math.max(a.width, b.width);
+  const height = a.height + SEAM + b.height;
+  return {
+    width,
+    height,
+    panels: [
+      { left: Math.round((width - a.width) / 2), top: 0, width: a.width, height: a.height },
+      { left: Math.round((width - b.width) / 2), top: a.height + SEAM, width: b.width, height: b.height },
+    ],
+  };
+}
 
-  const width = TARGET_SIDE;
-  const height = Math.max(1, Math.round(width / targetRatio));
-  return scaleLayout(width, height * 2 + SEAM, [
-    { left: 0, top: 0, width, height },
-    { left: 0, top: height + SEAM, width, height },
-  ]);
+function chooseCompactLayout(a: PanelSize, b: PanelSize) {
+  const horizontal = horizontalCandidate(a, b);
+  const vertical = verticalCandidate(a, b);
+  const horizontalScale = safeScale(horizontal.width, horizontal.height);
+  const verticalScale = safeScale(vertical.width, vertical.height);
+
+  // First prefer the layout that keeps more of the original source pixels. If both can remain
+  // full-size, prefer the more compact/square canvas so V-Editor allocates resolution efficiently.
+  const raw = Math.abs(horizontalScale - verticalScale) > 0.01
+    ? (horizontalScale > verticalScale ? horizontal : vertical)
+    : (Math.abs(Math.log(horizontal.width / horizontal.height)) <= Math.abs(Math.log(vertical.width / vertical.height)) ? horizontal : vertical);
+
+  return scaleLayout(raw.width, raw.height, raw.panels);
+}
+
+function panelSizeForSource(bitmap: ImageBitmap, targetRatio: number | null): PanelSize {
+  if (!targetRatio) return { width: bitmap.width, height: bitmap.height };
+
+  // Build the smallest requested-ratio frame that contains the full source at native size.
+  // This creates padding only when the user explicitly asks for a different output ratio.
+  const sourceRatio = bitmap.width / bitmap.height;
+  if (sourceRatio > targetRatio) {
+    return { width: bitmap.width, height: Math.max(bitmap.height, Math.ceil(bitmap.width / targetRatio)) };
+  }
+  return { width: Math.max(bitmap.width, Math.ceil(bitmap.height * targetRatio)), height: bitmap.height };
 }
 
 function choosePanels(a: ImageBitmap, b: ImageBitmap, targetRatio: number | null) {
-  return targetRatio ? requestedRatioLayout(targetRatio) : naturalLayout(a, b);
+  return chooseCompactLayout(panelSizeForSource(a, targetRatio), panelSizeForSource(b, targetRatio));
 }
 
 function drawContained(context: CanvasRenderingContext2D, bitmap: ImageBitmap, panel: Panel) {
@@ -166,18 +207,26 @@ function buildPairPrompt(prompt: string) {
   return `${base}\n\n${additions.join("\n\n")}`;
 }
 
-async function makeComposite(urlA: string, urlB: string, ratio: string, originalFetch: typeof window.fetch) {
-  const [a, b] = await Promise.all([fetchBitmap(urlA, originalFetch), fetchBitmap(urlB, originalFetch)]);
+async function makeComposite(
+  sourceA: string,
+  sourceB: string,
+  ratio: string,
+  originalFetch: typeof window.fetch,
+  onProgress?: (percent: number, detail: string) => void,
+) {
+  onProgress?.(5, "Reading the two original images locally…");
+  const [a, b] = await Promise.all([fetchBitmap(sourceA, originalFetch), fetchBitmap(sourceB, originalFetch)]);
   try {
+    onProgress?.(20, "Choosing a no-crop layout from the original dimensions…");
     const layout = choosePanels(a, b, parseRatio(ratio));
     const canvas = document.createElement("canvas");
     canvas.width = layout.width;
     canvas.height = layout.height;
-    const context = canvas.getContext("2d");
+    const context = canvas.getContext("2d", { alpha: false });
     if (!context) throw new Error("Canvas is not available in this browser.");
 
-    // This is intentionally only normal canvas compositing: no face detection, enhancement,
-    // alignment, segmentation, AI preprocessing, crop-normalisation, or smart retouching.
+    // Plain browser canvas only: no AI, face detection, alignment, enhancement, segmentation,
+    // blending or crop-normalisation happens before V-Editor.
     context.imageSmoothingEnabled = true;
     context.imageSmoothingQuality = "high";
     context.fillStyle = "#ffffff";
@@ -185,21 +234,19 @@ async function makeComposite(urlA: string, urlB: string, ratio: string, original
     drawContained(context, a, layout.panels[0]);
     drawContained(context, b, layout.panels[1]);
 
-    // Keep only a very small neutral seam so V-Editor can distinguish the two photos without
-    // adding a heavy divider that could become part of the generated image.
-    const first = layout.panels[0];
-    const second = layout.panels[1];
-    context.fillStyle = "#ffffff";
-    if (first.top === second.top) {
-      context.fillRect(first.left + first.width, 0, Math.max(1, second.left - first.left - first.width), canvas.height);
-    } else {
-      context.fillRect(0, first.top + first.height, canvas.width, Math.max(1, second.top - first.top - first.height));
-    }
-
-    // PNG avoids the extra JPEG compression pass that previously happened before V-Editor.
+    onProgress?.(42, `Building lossless ${canvas.width}×${canvas.height} PNG collage…`);
     const blob = await canvasBlob(canvas, "image/png");
     const file = new File([blob], `pixora-pair-${crypto.randomUUID()}.png`, { type: "image/png" });
-    const uploaded = await upload(`pixora-inputs/pairs/${Date.now()}-${file.name}`, file, { access: "public" });
+
+    onProgress?.(55, "Uploading the lossless smart batch…");
+    const uploaded = await upload(`pixora-inputs/pairs/${Date.now()}-${file.name}`, file, {
+      access: "public",
+      onUploadProgress(event) {
+        onProgress?.(55 + Math.min(45, event.percentage * 0.45), `Uploading smart batch · ${Math.round(event.percentage)}%`);
+      },
+    });
+
+    onProgress?.(100, "Smart batch ready for V-Editor.");
     return {
       imageUrl: uploaded.url,
       crops: layout.panels.map((panel) => ({
@@ -226,10 +273,9 @@ async function splitAndPersist(outputUrl: string, crops: NormalizedCrop[], pairK
       const canvas = document.createElement("canvas");
       canvas.width = sw;
       canvas.height = sh;
-      const context = canvas.getContext("2d");
+      const context = canvas.getContext("2d", { alpha: false });
       if (!context) throw new Error("Canvas is not available in this browser.");
-      context.imageSmoothingEnabled = true;
-      context.imageSmoothingQuality = "high";
+      context.imageSmoothingEnabled = false;
       context.drawImage(bitmap, sx, sy, sw, sh, 0, 0, sw, sh);
       const blob = await canvasBlob(canvas, "image/png");
       const file = new File([blob], `pixora-${pairKey}-${panelIndex + 1}.png`, { type: "image/png" });
@@ -283,10 +329,23 @@ export default function BatchPairBridge() {
         const imageUrls = Array.isArray(payload.imageUrls) ? payload.imageUrls : [];
         if (imageUrls.length < 2 || !payload.prompt?.trim()) return originalFetch(input, init);
 
+        // Resolve the original local object URLs from the visible batch cards. This means the
+        // combine step does not download the just-uploaded originals back from the network.
+        const localPreviews = currentLocalPreviewUrls(imageUrls.length);
         const pairStarts = Array.from({ length: Math.ceil(imageUrls.length / 2) }, (_, index) => index * 2);
-        const groups = await mapLimit(pairStarts, 3, async (start): Promise<PreparedGroup> => {
+        const groupProgress = new Array(pairStarts.length).fill(0);
+        const reportGroupProgress = (groupIndex: number, percent: number, detail: string) => {
+          groupProgress[groupIndex] = Math.max(groupProgress[groupIndex], Math.max(0, Math.min(100, percent)));
+          const overall = groupProgress.reduce((sum, value) => sum + value, 0) / Math.max(1, groupProgress.length);
+          emitPairProgress({ percent: overall, detail });
+        };
+
+        emitPairProgress({ percent: 1, detail: "Using original local images — no re-download and no AI preprocessing." });
+
+        const groups = await mapLimit(pairStarts, 2, async (start, groupIndex): Promise<PreparedGroup> => {
           const second = start + 1;
           if (second >= imageUrls.length) {
+            reportGroupProgress(groupIndex, 100, "Odd final image stays as a normal single V-Editor request.");
             return {
               originalIndexes: [start],
               imageUrl: imageUrls[start],
@@ -296,27 +355,41 @@ export default function BatchPairBridge() {
               prompt: payload.prompt!.trim(),
             };
           }
+
           try {
-            const composite = await makeComposite(imageUrls[start], imageUrls[second], payload.aspectRatio || "default", originalFetch);
+            const sourceA = localPreviews[start] || imageUrls[start];
+            const sourceB = localPreviews[second] || imageUrls[second];
+            const composite = await makeComposite(
+              sourceA,
+              sourceB,
+              payload.aspectRatio || "default",
+              originalFetch,
+              (percent, detail) => reportGroupProgress(groupIndex, percent, detail),
+            );
             return {
               originalIndexes: [start, second],
               imageUrl: composite.imageUrl,
               crops: composite.crops,
               aspectRatio: "default",
-              resultResolution: 1,
+              // Highest V-Editor result resolution is important because the single returned canvas
+              // is split into two final images afterwards.
+              resultResolution: 2,
               prompt: buildPairPrompt(payload.prompt!),
             };
           } catch (error) {
+            reportGroupProgress(groupIndex, 100, "A smart batch could not be prepared.");
             return {
               originalIndexes: [start, second],
               crops: [],
               aspectRatio: "default",
-              resultResolution: 1,
+              resultResolution: 2,
               prompt: payload.prompt!.trim(),
               error: error instanceof Error ? error.message : "Could not prepare this image pair.",
             };
           }
         });
+
+        emitPairProgress({ percent: 100, detail: "Smart batches uploaded. Starting V-Editor now…" });
 
         const submittedGroups = groups.filter((group) => group.imageUrl);
         const expandedTasks: BatchTask[] = groups.flatMap((group) => group.error
@@ -421,12 +494,14 @@ export default function BatchPairBridge() {
 
     const updateBatchCopy = () => {
       document.querySelectorAll<HTMLElement>(".fineprint").forEach((node) => {
-        if (node.textContent?.includes("Each image is a separate V-Editor request") || node.textContent?.includes("Smart pairing uses")) {
-          node.textContent = "Lossless smart pairing uses 1 V-Editor request for every 2 batch images · 50 images = 25 API requests.";
+        if (node.textContent?.includes("Each image is a separate V-Editor request") || node.textContent?.includes("Smart pairing uses") || node.textContent?.includes("Lossless smart pairing uses")) {
+          node.textContent = "Lossless local pairing uses 1 V-Editor request for every 2 batch images · paired outputs use maximum V-Editor resolution.";
         }
       });
       document.querySelectorAll<HTMLElement>(".privacy").forEach((node) => {
-        if (node.textContent?.includes("One prompt, separate generations") || node.textContent?.includes("One prompt, smart paired processing")) node.textContent = "◆ One prompt, lossless paired processing";
+        if (node.textContent?.includes("One prompt, separate generations") || node.textContent?.includes("One prompt, smart paired processing") || node.textContent?.includes("One prompt, lossless paired processing")) {
+          node.textContent = "◆ One prompt, local lossless paired processing";
+        }
       });
     };
     updateBatchCopy();
