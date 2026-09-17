@@ -6,7 +6,7 @@ import { upload } from "@vercel/blob/client";
 const ratios = ["default", "1:1", "3:2", "2:3", "9:16", "16:9", "3:4", "4:3"];
 const MAX_BATCH = 50;
 const MAX_FILE_BYTES = 12 * 1024 * 1024;
-const APP_VERSION = "1.0.1";
+const APP_VERSION = "1.0.2";
 const APP_VERSION_KEY = "pixora-app-version";
 
 type Mode = "single" | "batch" | "reference";
@@ -289,7 +289,6 @@ export default function Editor() {
       batchItemsRef.current = next;
       return next;
     });
-    accepted.forEach((item) => { void startBatchUpload(item).catch(() => undefined); });
     if (incoming.length > remaining) setBatchMessage(`Only the first ${remaining} image${remaining === 1 ? "" : "s"} were added. Maximum is ${MAX_BATCH}.`);
     else if (accepted.length !== all.length) setBatchMessage("Some files were skipped. Use PNG, JPG, or WEBP up to 12 MB each.");
     else setBatchMessage("");
@@ -326,11 +325,11 @@ export default function Editor() {
     const existing = batchUploadPromisesRef.current.get(item.id);
     if (existing) return existing;
 
-    updateBatchItem(item.id, { error: undefined, progress: Math.max(1, current.progress), label: "Queued for background upload…", status: "uploading" });
+    updateBatchItem(item.id, { error: undefined, progress: Math.max(1, current.progress), label: "Queued for upload…", status: "uploading" });
     const promise = new Promise<string>((resolve, reject) => {
       batchUploadQueueRef.current.push(() => {
         activeBatchUploadsRef.current += 1;
-        updateBatchItem(item.id, { label: "Uploading in background…", status: "uploading" });
+        updateBatchItem(item.id, { label: "Uploading…", status: "uploading" });
         void uploadImage(item.file, (percentage) => {
           const now = Date.now();
           const rounded = Math.round(percentage);
@@ -339,7 +338,7 @@ export default function Editor() {
           batchUploadProgressRef.current.set(item.id, { percent: rounded, at: now });
           updateBatchItem(item.id, {
             progress: Math.max(1, percentage * 0.45),
-            label: `Uploading in background only · ${rounded}%`,
+            label: `Uploading · ${rounded}%`,
             status: "uploading",
           });
         }).then((uploadedUrl) => {
@@ -446,7 +445,7 @@ export default function Editor() {
         result: undefined,
         error: undefined,
         progress: item.uploadedUrl ? 48 : Math.min(47, Math.max(1, item.progress)),
-        label: item.uploadedUrl ? "Uploaded · ready to generate" : "Finishing background upload…",
+        label: item.uploadedUrl ? "Uploaded · preparing generation" : "Starting upload…",
         status: item.uploadedUrl ? "queued" as BatchStatus : "uploading" as BatchStatus,
       }));
       batchItemsRef.current = next;

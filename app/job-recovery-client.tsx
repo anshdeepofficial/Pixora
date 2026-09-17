@@ -488,7 +488,9 @@ export default function JobRecoveryClient() {
     if (!current || !freshJob(current)) return;
     if (current.bootId === currentBoot.current && !current.managedByRecovery) return;
     if (current.phase === "submitting" || current.phase === "uploading") {
-      void submitRecovered(current);
+      // Never submit a new paid VModel request automatically after a refresh. Existing task
+      // IDs may still be polled safely, but restarting a request requires an explicit retry.
+      commit({ ...current, phase: "failed", recoveryError: "The page refreshed before submission finished. Nothing was restarted automatically; retry only if you choose to." });
     }
   }, [recovered]);
 
