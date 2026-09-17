@@ -111,6 +111,10 @@ export default function Editor() {
   const [batchBusy, setBatchBusy] = useState(false);
   const [batchMessage, setBatchMessage] = useState("");
   const [batchDownloading, setBatchDownloading] = useState(false);
+  const batchItemsRef = useRef<BatchItem[]>([]);
+  const batchUploadPromisesRef = useRef(new Map<string, Promise<string>>());
+  const batchUploadQueueRef = useRef<Array<() => void>>([]);
+  const activeBatchUploadsRef = useRef(0);
 
   const [referenceMain, setReferenceMain] = useState<File | null>(null);
   const [referenceMainPreview, setReferenceMainPreview] = useState("");
@@ -197,6 +201,10 @@ export default function Editor() {
     label: batchBusy ? `${batchDone} of ${batchItems.length} completed${batchFailed ? ` · ${batchFailed} failed` : ""}` : batchDone === batchItems.length ? `All ${batchDone} images completed` : `${batchDone} completed${batchFailed ? ` · ${batchFailed} failed` : ""}`,
   } : { percent: 0, label: "", state: "idle" };
 
+  useEffect(() => {
+    batchItemsRef.current = batchItems;
+  }, [batchItems]);
+
   function addHistory(url: string, prompt: string, incrementGenerationCount = true) {
     const item = { url, prompt, createdAt: new Date().toISOString() };
     setHistory((current) => {
@@ -256,12 +264,17 @@ export default function Editor() {
   function addBatchFiles(list: FileList | File[]) {
     const all = Array.from(list);
     const incoming = all.filter((file) => ["image/png", "image/jpeg", "image/webp"].includes(file.type) && file.size <= MAX_FILE_BYTES);
-    const remaining = MAX_BATCH - batchItems.length;
+    const remaining = MAX_BATCH - batchItemsRef.current.length;
     if (remaining <= 0) { setBatchMessage(`Maximum ${MAX_BATCH} images per batch.`); return; }
     const accepted = incoming.slice(0, remaining).map((file) => ({
       id: crypto.randomUUID(), file, preview: URL.createObjectURL(file), progress: 0, label: "Ready", status: "ready" as BatchStatus,
     }));
-    setBatchItems((current) => [...current, ...accepted]);
+    setBatchItems((current) => {
+      const next = [...current, ...accepted];
+      batchItemsRef.current = next;
+      return next;
+    });
+    accepted.forEach((item) => { void startBatchUpload(item).catch(() => undefined); });
     if (incoming.length > remaining) setBatchMessage(`Only the first ${remaining} image${remaining === 1 ? "" : "s"} were added. Maximum is ${MAX_BATCH}.`);
     else if (accepted.length !== all.length) setBatchMessage("Some files were skipped. Use PNG, JPG, or WEBP up to 12 MB each.");
     else setBatchMessage("");
@@ -271,18 +284,65 @@ export default function Editor() {
     setBatchItems((current) => {
       const item = current.find((entry) => entry.id === id);
       if (item) URL.revokeObjectURL(item.preview);
-      return current.filter((entry) => entry.id !== id);
+      const next = current.filter((entry) => entry.id !== id);
+      batchItemsRef.current = next;
+      return next;
     });
   }
 
   function clearBatch() {
     batchItems.forEach((item) => URL.revokeObjectURL(item.preview));
+    batchItemsRef.current = [];
     setBatchItems([]);
     setBatchMessage("");
   }
 
   function updateBatchItem(id: string, patch: Partial<BatchItem>) {
-    setBatchItems((current) => current.map((item) => item.id === id ? { ...item, ...patch } : item));
+    setBatchItems((current) => {
+      const next = current.map((item) => item.id === id ? { ...item, ...patch } : item);
+      batchItemsRef.current = next;
+      return next;
+    });
+  }
+
+  function startBatchUpload(item: BatchItem) {
+    const current = batchItemsRef.current.find((entry) => entry.id === item.id) || item;
+    if (current.uploadedUrl) return Promise.resolve(current.uploadedUrl);
+    const existing = batchUploadPromisesRef.current.get(item.id);
+    if (existing) return existing;
+
+    updateBatchItem(item.id, { error: undefined, progress: Math.max(1, current.progress), label: "Queued for background upload…", status: "uploading" });
+    const promise = new Promise<string>((resolve, reject) => {
+      batchUploadQueueRef.current.push(() => {
+        activeBatchUploadsRef.current += 1;
+        updateBatchItem(item.id, { label: "Uploading in background…", status: "uploading" });
+        void uploadImage(item.file, (percentage) => updateBatchItem(item.id, {
+          progress: Math.max(1, percentage * 0.45),
+          label: `Uploading in background · ${Math.round(percentage)}%`,
+          status: "uploading",
+        })).then((uploadedUrl) => {
+          updateBatchItem(item.id, { uploadedUrl, progress: 48, label: "Uploaded · ready to generate", status: "queued", error: undefined });
+          resolve(uploadedUrl);
+        }).catch((error) => {
+          const detail = error instanceof Error ? error.message : "Upload failed";
+          updateBatchItem(item.id, { progress: 100, label: detail, status: "failed", error: detail });
+          reject(error);
+        }).finally(() => {
+          activeBatchUploadsRef.current -= 1;
+          batchUploadPromisesRef.current.delete(item.id);
+          pumpBatchUploads();
+        });
+      });
+    });
+    batchUploadPromisesRef.current.set(item.id, promise);
+    pumpBatchUploads();
+    return promise;
+  }
+
+  function pumpBatchUploads() {
+    while (activeBatchUploadsRef.current < 4 && batchUploadQueueRef.current.length) {
+      batchUploadQueueRef.current.shift()?.();
+    }
   }
 
   async function pollTask(taskId: string, onStatus: (status: string) => void) {
@@ -354,12 +414,25 @@ export default function Editor() {
     if (!batchItems.length || !batchPrompt.trim()) { setBatchMessage("Add at least one image and enter a shared prompt."); return; }
     if (batchItems.length > MAX_BATCH) { setBatchMessage(`Maximum ${MAX_BATCH} images per batch.`); return; }
     setBatchBusy(true); setBatchMessage(""); setOutputTab("result");
-    setBatchItems((current) => current.map((item) => ({ ...item, uploadedUrl: undefined, taskId: undefined, result: undefined, error: undefined, progress: 1, label: "Starting upload…", status: "uploading" })));
+    const items = batchItemsRef.current;
+    setBatchItems((current) => {
+      const next = current.map((item) => ({
+        ...item,
+        taskId: undefined,
+        result: undefined,
+        error: undefined,
+        progress: item.uploadedUrl ? 48 : Math.min(47, Math.max(1, item.progress)),
+        label: item.uploadedUrl ? "Uploaded · ready to generate" : "Finishing background upload…",
+        status: item.uploadedUrl ? "queued" as BatchStatus : "uploading" as BatchStatus,
+      }));
+      batchItemsRef.current = next;
+      return next;
+    });
     try {
-      const uploadResults = await mapLimit(batchItems, 4, async (item) => {
+      const uploadResults = await mapLimit(items, 4, async (item) => {
         try {
-          const uploadedUrl = await uploadImage(item.file, (percentage) => updateBatchItem(item.id, { progress: Math.max(1, percentage * 0.45), label: `Uploading · ${Math.round(percentage)}%`, status: "uploading" }));
-          updateBatchItem(item.id, { uploadedUrl, progress: 48, label: "Uploaded · creating task", status: "queued" });
+          const uploadedUrl = item.uploadedUrl || await startBatchUpload(item);
+          updateBatchItem(item.id, { uploadedUrl, progress: 48, label: "Uploaded · entering live pipeline", status: "queued" });
           return { id: item.id, uploadedUrl };
         } catch (error) {
           const detail = error instanceof Error ? error.message : "Upload failed";

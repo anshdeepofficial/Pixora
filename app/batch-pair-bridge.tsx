@@ -29,6 +29,10 @@ type SyntheticTask = {
   pairKey: string;
   createdAt: number;
 };
+type PendingSyntheticTask = {
+  entry?: SyntheticTask;
+  error?: string;
+};
 type TaskPoll = { status?: string; output?: string[]; error?: string };
 
 type PairProgress = {
@@ -336,6 +340,7 @@ export default function BatchPairBridge() {
   useEffect(() => {
     const originalFetch = window.fetch.bind(window);
     const syntheticTasks = restoreSyntheticTasks();
+    const pendingSyntheticTasks = new Map<string, PendingSyntheticTask>();
     persistSyntheticTasks(syntheticTasks);
     const splitPromises = new Map<string, Promise<string[]>>();
     const pollCache = new Map<string, { at: number; data: TaskPoll; ok: boolean; status: number }>();
@@ -385,123 +390,117 @@ export default function BatchPairBridge() {
           emitPairProgress({ percent: overall, detail });
         };
 
-        emitPairProgress({ percent: 1, detail: "Using original local images — no re-download and no AI preprocessing." });
+        emitPairProgress({ percent: 1, detail: "Live pipeline started — preparing the first pair now." });
 
-        const groups = await mapLimit(pairStarts, 2, async (start, groupIndex): Promise<PreparedGroup> => {
-          const second = start + 1;
-          if (second >= imageUrls.length) {
-            reportGroupProgress(groupIndex, 100, "Odd final image stays as a normal single V-Editor request.");
-            return {
-              originalIndexes: [start],
-              imageUrl: imageUrls[start],
-              crops: [],
-              aspectRatio: payload.aspectRatio || "default",
-              resultResolution: 0,
-              prompt: payload.prompt!.trim(),
-            };
-          }
+        const pipelineGroups = pairStarts.map((start, groupIndex) => {
+          const originalIndexes = start + 1 < imageUrls.length ? [start, start + 1] : [start];
+          const taskIds = originalIndexes.map(() => `${PAIR_PREFIX}${crypto.randomUUID().replace(/-/g, "")}`);
+          taskIds.forEach((taskId) => pendingSyntheticTasks.set(taskId, {}));
+          return { start, groupIndex, originalIndexes, taskIds };
+        });
+        const expandedTasks: BatchTask[] = pipelineGroups.flatMap((group) => group.originalIndexes.map((index, panelIndex) => ({
+          index,
+          taskId: group.taskIds[panelIndex],
+        })));
 
+        // Return task handles immediately. Each worker prepares one pair and submits it to
+        // V-Editor without waiting for the remaining pairs, so generation, splitting and UI
+        // delivery overlap with preparation of the rest of the batch.
+        void mapLimit(pipelineGroups, 2, async (pipelineGroup) => {
+          const { start, groupIndex, originalIndexes, taskIds } = pipelineGroup;
+          let group: PreparedGroup;
           try {
-            const sourceA = localPreviews[start] || imageUrls[start];
-            const sourceB = localPreviews[second] || imageUrls[second];
-            const composite = await makeComposite(
-              sourceA,
-              sourceB,
-              originalFetch,
-              (percent, detail) => reportGroupProgress(groupIndex, percent, detail),
-            );
-            return {
-              originalIndexes: [start, second],
-              imageUrl: composite.imageUrl,
-              crops: composite.crops,
-              aspectRatio: "default",
-              // Balanced resolution avoids the long processing and failures caused by forcing
-              // maximum resolution on every paired request.
-              resultResolution: 1,
-              prompt: buildPairPrompt(payload.prompt!),
-            };
-          } catch (error) {
-            reportGroupProgress(groupIndex, 100, "A smart batch could not be prepared.");
-            return {
-              originalIndexes: [start, second],
-              crops: [],
-              aspectRatio: "default",
-              resultResolution: 2,
-              prompt: payload.prompt!.trim(),
-              error: error instanceof Error ? error.message : "Could not prepare this image pair.",
-            };
-          }
-        });
+            if (originalIndexes.length === 1) {
+              group = {
+                originalIndexes,
+                imageUrl: imageUrls[start],
+                crops: [],
+                aspectRatio: payload.aspectRatio || "default",
+                resultResolution: 0,
+                prompt: payload.prompt!.trim(),
+              };
+              reportGroupProgress(groupIndex, 55, `Image ${start + 1} ready for V-Editor.`);
+            } else {
+              const composite = await makeComposite(
+                localPreviews[start] || imageUrls[start],
+                localPreviews[start + 1] || imageUrls[start + 1],
+                originalFetch,
+                (percent, detail) => reportGroupProgress(groupIndex, percent * 0.55, detail),
+              );
+              group = {
+                originalIndexes,
+                imageUrl: composite.imageUrl,
+                crops: composite.crops,
+                aspectRatio: "default",
+                resultResolution: 1,
+                prompt: buildPairPrompt(payload.prompt!),
+              };
+            }
 
-        emitPairProgress({ percent: 100, detail: "Smart batches uploaded. Starting V-Editor now…" });
-
-        const submittedGroups = groups.filter((group) => group.imageUrl);
-        const expandedTasks: BatchTask[] = groups.flatMap((group) => group.error
-          ? group.originalIndexes.map((index) => ({ index, error: group.error }))
-          : []);
-
-        if (!submittedGroups.length) {
-          expandedTasks.sort((a, b) => a.index - b.index);
-          persistBridgeBatch(imageUrls, payload, expandedTasks, 0);
-          return new Response(JSON.stringify({ tasks: expandedTasks, error: "Could not prepare any image pair." }), {
-            status: 200,
-            headers: { "Content-Type": "application/json", "Cache-Control": "no-store" },
-          });
-        }
-
-        const transformedBody = JSON.stringify({
-          imageUrls: submittedGroups.map((group) => group.imageUrl),
-          prompt: payload.prompt,
-          aspectRatio: payload.aspectRatio,
-          prompts: submittedGroups.map((group) => group.prompt),
-          aspectRatios: submittedGroups.map((group) => group.aspectRatio),
-          resultResolutions: submittedGroups.map((group) => group.resultResolution),
-        });
-        const serverResponse = await originalFetch(input, { ...init, body: transformedBody });
-        const serverData = await serverResponse.json() as { tasks?: BatchTask[]; error?: string };
-
-        for (const task of serverData.tasks || []) {
-          const group = submittedGroups[task.index];
-          if (!group) continue;
-          if (!task.taskId) {
-            expandedTasks.push(...group.originalIndexes.map((index) => ({ index, error: task.error || "Could not start this pair." })));
-            continue;
-          }
-          if (group.originalIndexes.length === 1) {
-            expandedTasks.push({ index: group.originalIndexes[0], taskId: task.taskId });
-            continue;
-          }
-          const pairKey = crypto.randomUUID();
-          group.originalIndexes.forEach((originalIndex, panelIndex) => {
-            const syntheticId = `${PAIR_PREFIX}${crypto.randomUUID().replace(/-/g, "")}`;
-            syntheticTasks.set(syntheticId, {
-              realTaskId: task.taskId!,
-              crop: group.crops[panelIndex],
-              panelIndex,
-              pairKey,
-              createdAt: Date.now(),
+            reportGroupProgress(groupIndex, 65, `Pair ${groupIndex + 1} prepared · sending to V-Editor…`);
+            const response = await originalFetch(input, {
+              ...init,
+              body: JSON.stringify({
+                imageUrls: [group.imageUrl],
+                prompt: payload.prompt,
+                aspectRatio: payload.aspectRatio,
+                prompts: [group.prompt],
+                aspectRatios: [group.aspectRatio],
+                resultResolutions: [group.resultResolution],
+              }),
             });
-            expandedTasks.push({ index: originalIndex, taskId: syntheticId });
-          });
-        }
+            const data = await response.json() as { tasks?: BatchTask[]; error?: string };
+            const realTask = data.tasks?.[0];
+            if (!response.ok || !realTask?.taskId) throw new Error(realTask?.error || data.error || "Could not start this pair.");
 
-        persistSyntheticTasks(syntheticTasks);
+            const pairKey = crypto.randomUUID();
+            taskIds.forEach((syntheticId, panelIndex) => {
+              const entry: SyntheticTask = {
+                realTaskId: realTask.taskId!,
+                crop: group.crops[panelIndex] || { x: 0, y: 0, width: 1, height: 1 },
+                panelIndex,
+                pairKey,
+                createdAt: Date.now(),
+              };
+              syntheticTasks.set(syntheticId, entry);
+              const pending = pendingSyntheticTasks.get(syntheticId);
+              if (pending) pending.entry = entry;
+            });
+            persistSyntheticTasks(syntheticTasks);
+            persistBridgeBatch(imageUrls, payload, expandedTasks, pipelineGroups.length);
+            reportGroupProgress(groupIndex, 100, `Pair ${groupIndex + 1} is generating · preparing the next pair in parallel.`);
+          } catch (error) {
+            const detail = error instanceof Error ? error.message : "Could not prepare or start this pair.";
+            taskIds.forEach((syntheticId) => {
+              const pending = pendingSyntheticTasks.get(syntheticId);
+              if (pending) pending.error = detail;
+            });
+            reportGroupProgress(groupIndex, 100, `Pair ${groupIndex + 1} failed to start; later pairs will continue.`);
+          }
+        }).catch(() => undefined);
+
         expandedTasks.sort((a, b) => a.index - b.index);
-        persistBridgeBatch(imageUrls, payload, expandedTasks, submittedGroups.length);
+        persistBridgeBatch(imageUrls, payload, expandedTasks, pipelineGroups.length);
         return new Response(JSON.stringify({
-          ...serverData,
           tasks: expandedTasks,
           sourceImageCount: imageUrls.length,
-          vmodelRequestCount: submittedGroups.length,
+          vmodelRequestCount: pipelineGroups.length,
         }), {
-          status: serverResponse.ok || expandedTasks.length ? 200 : serverResponse.status,
+          status: 200,
           headers: { "Content-Type": "application/json", "Cache-Control": "no-store" },
         });
       }
 
       if (url.origin === window.location.origin && url.pathname === "/api/task" && requestMethod(input, init) === "GET") {
         const syntheticId = url.searchParams.get("id") || "";
-        const entry = syntheticTasks.get(syntheticId);
+        const pending = pendingSyntheticTasks.get(syntheticId);
+        const entry = syntheticTasks.get(syntheticId) || pending?.entry;
+        if (!entry && pending?.error) {
+          return new Response(JSON.stringify({ status: "failed", error: pending.error }), { status: 200, headers: { "Content-Type": "application/json", "Cache-Control": "no-store" } });
+        }
+        if (!entry && pending) {
+          return new Response(JSON.stringify({ status: "preparing" }), { status: 200, headers: { "Content-Type": "application/json", "Cache-Control": "no-store" } });
+        }
         if (!entry) return originalFetch(input, init);
 
         const polled = await pollRealTask(entry.realTaskId);
