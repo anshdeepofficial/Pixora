@@ -6,6 +6,8 @@ import { upload } from "@vercel/blob/client";
 const ratios = ["default", "1:1", "3:2", "2:3", "9:16", "16:9", "3:4", "4:3"];
 const MAX_BATCH = 50;
 const MAX_FILE_BYTES = 12 * 1024 * 1024;
+const APP_VERSION = "1.0.1";
+const APP_VERSION_KEY = "pixora-app-version";
 
 type Mode = "single" | "batch" | "reference";
 type OutputTab = "result" | "history";
@@ -138,11 +140,22 @@ export default function Editor() {
   const [viewerUrls, setViewerUrls] = useState<string[]>([]);
   const [viewerIndex, setViewerIndex] = useState(0);
   const [pendingUndo, setPendingUndo] = useState<{ item: HistoryItem; index: number } | null>(null);
+  const [versionNotice, setVersionNotice] = useState(false);
   const swipeStart = useRef<number | null>(null);
   const undoSwipeStart = useRef<number | null>(null);
   const undoTimerRef = useRef<number | null>(null);
 
   const isProcessing = singleBusy || batchBusy || referenceBusy;
+
+  useEffect(() => {
+    const previous = localStorage.getItem(APP_VERSION_KEY);
+    localStorage.setItem(APP_VERSION_KEY, APP_VERSION);
+    if (previous !== APP_VERSION) {
+      setVersionNotice(true);
+      const timer = window.setTimeout(() => setVersionNotice(false), 5000);
+      return () => window.clearTimeout(timer);
+    }
+  }, []);
 
   useEffect(() => {
     const prune = () => {
@@ -672,7 +685,8 @@ export default function Editor() {
   const activeResult = mode === "single" ? singleResult : mode === "reference" ? referenceResult : "";
 
   return <main className="shell">
-    <nav className="nav"><a className="brand" href="#top" aria-label="Pixora home"><span className="brandMark">P</span><span>Pixora</span></a><div className="navActions"><span className="statusDot"><i /> V-Editor connected</span><a href="#how">How it works</a></div></nav>
+    <nav className="nav"><a className="brand" href="#top" aria-label="Pixora home"><span className="brandMark">P</span><span>Pixora</span><small className="versionBadge">v{APP_VERSION}</small></a><div className="navActions"><span className="statusDot"><i /> V-Editor connected</span><a href="#how">How it works</a></div></nav>
+    {versionNotice && <div className="versionNotice" role="status"><b>✓ Updated to v{APP_VERSION}</b><span>The latest Pixora fixes are active.</span><button type="button" onClick={() => setVersionNotice(false)} aria-label="Close update notice">×</button></div>}
 
     <section className="hero" id="top"><div className="eyebrow"><span>✦</span> AI PHOTO EDITOR</div><h1>Edit any photo.<br /><em>Just describe it.</em></h1><p>Single edits, batch transformations, and reference-guided creations—powered by V-Editor.</p><div className="heroBadges"><div className="unlimited"><span>∞</span><div><strong>Unlimited trials</strong><small>Explore freely during early access</small></div></div><div className="generatedCount"><strong>{totalGenerated === null ? "—" : totalGenerated.toLocaleString()}</strong><span>images generated</span></div></div></section>
 
@@ -774,6 +788,6 @@ export default function Editor() {
     }}><span>Image removed</span><button type="button" className="undoAction" onClick={undoHistoryRemoval}>Undo</button><button type="button" className="undoClose" onClick={dismissUndo} aria-label="Dismiss undo message">×</button></div>}
 
     <section className="how" id="how"><p className="eyebrow">THREE WAYS TO CREATE</p><h2>One editor.<br />Three flexible workflows.</h2><div className="howGrid"><article><span>01</span><h3>Single</h3><p>Edit one image with a direct natural-language instruction.</p></article><article><span>02</span><h3>Batch</h3><p>Apply one shared prompt to as many as {MAX_BATCH} images in one run.</p></article><article><span>03</span><h3>Reference</h3><p>Guide a main image with a second visual reference plus your prompt.</p></article></div></section>
-    <footer><a className="brand" href="#top"><span className="brandMark">P</span><span>Pixora</span></a><p>AI editing, without the complexity.</p><span>Powered by VModel V-Editor</span></footer>
+    <footer><a className="brand" href="#top"><span className="brandMark">P</span><span>Pixora</span><small className="versionBadge">v{APP_VERSION}</small></a><p>AI editing, without the complexity.</p><span>Powered by VModel V-Editor</span></footer>
   </main>;
 }

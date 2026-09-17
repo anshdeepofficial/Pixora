@@ -4,7 +4,9 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { upload } from "../lib/imagekit-upload-client";
 
-const ACTIVE_JOB_KEY = "pixora-active-job-v3";
+// v4 intentionally retires the oversized legacy failure panel saved by older builds.
+const ACTIVE_JOB_KEY = "pixora-active-job-v4";
+const LEGACY_ACTIVE_JOB_KEY = "pixora-active-job-v3";
 const BRIDGE_BATCH_KEY = "pixora-bridge-last-batch-v1";
 const RECOVERY_DB = "pixora-job-recovery";
 const RECOVERY_STORE = "files";
@@ -344,6 +346,7 @@ export default function JobRecoveryClient() {
   }, []);
 
   useEffect(() => {
+    localStorage.removeItem(LEGACY_ACTIVE_JOB_KEY);
     const originalFetch = window.fetch.bind(window);
     networkFetch.current = originalFetch;
 
@@ -578,10 +581,18 @@ export default function JobRecoveryClient() {
   const total = Number(job.sourceCount || job.sourceUrls?.length || 1);
   const done = (job.tasks || []).filter((task) => task.status === "done").length;
   const failed = (job.tasks || []).filter((task) => task.status === "failed").length;
+  const closeAll = () => {
+    const id = job?.id;
+    writeJob(null);
+    localStorage.removeItem(BRIDGE_BATCH_KEY);
+    setJob(null);
+    setMessage("");
+    if (id) void clearRecoveryFiles(id);
+  };
 
   return <div className="pxRecoveryPanel" aria-live="polite">
     <style>{`
-      .pxRecoveryPanel{position:fixed;z-index:8995;left:18px;bottom:18px;width:min(390px,calc(100vw - 36px));padding:14px;border:1px solid rgba(126,150,60,.42);border-radius:17px;background:rgba(247,248,241,.97);box-shadow:0 18px 55px rgba(18,28,20,.2);backdrop-filter:blur(12px);color:#171914;font-family:var(--font-geist),Arial,sans-serif}.pxRecoveryPanel small{display:block;color:#73804e;font-size:9px;font-weight:850;letter-spacing:.09em;text-transform:uppercase}.pxRecoveryPanel h4{margin:4px 0 5px;font:800 14px var(--font-manrope),Arial,sans-serif}.pxRecoveryPanel p{margin:0;color:#6d7169;font-size:10px;line-height:1.45}.pxRecoveryStats{display:flex;gap:10px;margin-top:9px;font-size:9px;color:#747870}.pxRecoveryStats b{color:#173d2d}.pxRetryList{display:grid;gap:7px;margin-top:10px}.pxRetryRow{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:9px 10px;border:1px solid #dedfd5;border-radius:11px;background:#fff}.pxRetryRow span{font-size:10px;font-weight:750}.pxRetryRow button,.pxRetrySingle{border:0;border-radius:9px;background:#173d2d;color:#e7f7b9;padding:7px 10px;font-size:9px;font-weight:850;cursor:pointer}.pxRecoveryMsg{margin-top:8px!important;color:#845b31!important}.pxRecoveryDismiss{position:absolute;right:10px;top:9px;border:0;background:transparent;color:#777;font-size:18px;cursor:pointer}@media(max-width:620px){.pxRecoveryPanel{left:12px;right:12px;bottom:72px;width:auto}}
+      .pxRecoveryPanel{position:fixed;z-index:8995;left:18px;bottom:18px;width:min(390px,calc(100vw - 36px));max-height:min(72vh,560px);display:flex;flex-direction:column;padding:14px;border:1px solid rgba(126,150,60,.42);border-radius:17px;background:rgba(247,248,241,.97);box-shadow:0 18px 55px rgba(18,28,20,.2);backdrop-filter:blur(12px);color:#171914;font-family:var(--font-geist),Arial,sans-serif;overflow:hidden}.pxRecoveryPanel small{display:block;color:#73804e;font-size:9px;font-weight:850;letter-spacing:.09em;text-transform:uppercase}.pxRecoveryPanel h4{margin:4px 0 5px;font:800 14px var(--font-manrope),Arial,sans-serif}.pxRecoveryPanel p{margin:0;color:#6d7169;font-size:10px;line-height:1.45}.pxRecoveryStats{display:flex;gap:10px;margin-top:9px;font-size:9px;color:#747870}.pxRecoveryStats b{color:#173d2d}.pxRetryList{display:grid;gap:7px;margin-top:10px;min-height:0;overflow-y:auto;overscroll-behavior:contain;padding-right:3px}.pxRetryRow{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:9px 10px;border:1px solid #dedfd5;border-radius:11px;background:#fff}.pxRetryRow span{font-size:10px;font-weight:750}.pxRetryRow button,.pxRetrySingle{border:0;border-radius:9px;background:#173d2d;color:#e7f7b9;padding:7px 10px;font-size:9px;font-weight:850;cursor:pointer}.pxRecoveryMsg{margin-top:8px!important;color:#845b31!important}.pxRecoveryDismiss{position:absolute;right:10px;top:9px;border:0;background:transparent;color:#777;font-size:18px;cursor:pointer}.pxRecoveryCloseAll{flex:0 0 auto;width:100%;margin-top:10px;padding:10px 12px;border:0;border-radius:11px;background:#272a25;color:#fff;font-size:10px;font-weight:850;cursor:pointer}@media(max-width:620px){.pxRecoveryPanel{left:12px;right:12px;bottom:12px;width:auto;max-height:58vh}}
     `}</style>
     {!isRecoveredActive && <button type="button" className="pxRecoveryDismiss" onClick={() => { if (job?.phase !== "processing") { writeJob(null); setJob(null); } }} aria-label="Dismiss recovery panel">×</button>}
     <small>{isRecoveredActive ? "REFRESH RECOVERY ACTIVE" : "RETRY AVAILABLE"}</small>
@@ -593,5 +604,6 @@ export default function JobRecoveryClient() {
       {job.kind === "batch" ? failures.map((indexes) => <div className="pxRetryRow" key={indexes.join("-")}><span>{indexes.length === 2 ? `Images ${indexes[0] + 1} & ${indexes[1] + 1} failed` : `Image ${indexes[0] + 1} failed`}</span><button type="button" onClick={() => void retryGroup(indexes)}>Retry {indexes.length === 2 ? "both" : "image"}</button></div>) : <button type="button" className="pxRetrySingle" onClick={() => void retrySingle()}>Retry same image</button>}
     </div>}
     {message && <p className="pxRecoveryMsg">{message}</p>}
+    <button type="button" className="pxRecoveryCloseAll" onClick={closeAll}>Close all</button>
   </div>;
 }
