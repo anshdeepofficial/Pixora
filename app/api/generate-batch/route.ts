@@ -5,9 +5,6 @@ type BatchBody = {
   imageUrls?: string[];
   prompt?: string;
   aspectRatio?: string;
-  prompts?: string[];
-  aspectRatios?: string[];
-  resultResolutions?: number[];
 };
 
 async function mapLimit<T, R>(items: T[], limit: number, worker: (item: T, index: number) => Promise<R>) {
@@ -40,20 +37,16 @@ export async function POST(request: Request) {
     return Response.json({ error: "No usable VModel API key is available. Add another API in Pixora Control." }, { status: 503 });
   }
 
-  // A bounded create window prevents VModel rate-limit bursts when a large batch starts.
+  // Every source image is sent to VModel as its own request. The small create window
+  // avoids a large rate-limit burst without combining, cropping, or preprocessing images.
   const tasks = await mapLimit(imageUrls, 4, async (imageUrl, index) => {
     const context = allocations[index];
     if (!context) return { index, error: "No queued API key has remaining generation capacity." };
     try {
-      const taskPrompt = body.prompts?.[index]?.trim() || body.prompt!;
-      const taskAspectRatio = body.aspectRatios?.[index] || body.aspectRatio;
-      const requestedResolution = body.resultResolutions?.[index];
-      const resultResolution: 0 | 1 | 2 = requestedResolution === 2 ? 2 : requestedResolution === 1 ? 1 : 0;
       const taskId = await createVModelTask(context.token, {
         imageUrl,
-        prompt: taskPrompt,
-        aspectRatio: taskAspectRatio,
-        resultResolution,
+        prompt: body.prompt!,
+        aspectRatio: body.aspectRatio,
       });
       return { index, taskId: packVModelTaskId(taskId, context.fingerprint) };
     } catch (error) {
