@@ -115,6 +115,7 @@ export default function Editor() {
   const batchUploadPromisesRef = useRef(new Map<string, Promise<string>>());
   const batchUploadQueueRef = useRef<Array<() => void>>([]);
   const activeBatchUploadsRef = useRef(0);
+  const batchUploadProgressRef = useRef(new Map<string, { percent: number; at: number }>());
 
   const [referenceMain, setReferenceMain] = useState<File | null>(null);
   const [referenceMainPreview, setReferenceMainPreview] = useState("");
@@ -194,11 +195,12 @@ export default function Editor() {
   const batchOverall = useMemo(() => batchItems.length ? Math.round(batchItems.reduce((sum, item) => sum + item.progress, 0) / batchItems.length) : 0, [batchItems]);
   const batchDone = batchItems.filter((item) => item.status === "done").length;
   const batchFailed = batchItems.filter((item) => item.status === "failed").length;
+  const batchUploaded = batchItems.filter((item) => item.uploadedUrl).length;
   const batchResults = batchItems.filter((item) => item.result).map((item) => item.result!);
   const batchProgress: ProgressState = batchItems.length && (batchBusy || batchOverall > 0) ? {
     percent: batchOverall,
     state: batchBusy ? "working" : batchFailed === batchItems.length ? "error" : batchDone > 0 ? "done" : "idle",
-    label: batchBusy ? `${batchDone} of ${batchItems.length} completed${batchFailed ? ` · ${batchFailed} failed` : ""}` : batchDone === batchItems.length ? `All ${batchDone} images completed` : `${batchDone} completed${batchFailed ? ` · ${batchFailed} failed` : ""}`,
+    label: batchBusy ? `${batchDone} of ${batchItems.length} completed${batchFailed ? ` · ${batchFailed} failed` : ""}` : batchDone === batchItems.length ? `All ${batchDone} images completed` : `${batchUploaded}/${batchItems.length} uploaded in background · generation not started`,
   } : { percent: 0, label: "", state: "idle" };
 
   useEffect(() => {
@@ -316,11 +318,18 @@ export default function Editor() {
       batchUploadQueueRef.current.push(() => {
         activeBatchUploadsRef.current += 1;
         updateBatchItem(item.id, { label: "Uploading in background…", status: "uploading" });
-        void uploadImage(item.file, (percentage) => updateBatchItem(item.id, {
-          progress: Math.max(1, percentage * 0.45),
-          label: `Uploading in background · ${Math.round(percentage)}%`,
-          status: "uploading",
-        })).then((uploadedUrl) => {
+        void uploadImage(item.file, (percentage) => {
+          const now = Date.now();
+          const rounded = Math.round(percentage);
+          const previous = batchUploadProgressRef.current.get(item.id);
+          if (rounded < 100 && previous && rounded - previous.percent < 5 && now - previous.at < 300) return;
+          batchUploadProgressRef.current.set(item.id, { percent: rounded, at: now });
+          updateBatchItem(item.id, {
+            progress: Math.max(1, percentage * 0.45),
+            label: `Uploading in background only · ${rounded}%`,
+            status: "uploading",
+          });
+        }).then((uploadedUrl) => {
           updateBatchItem(item.id, { uploadedUrl, progress: 48, label: "Uploaded · ready to generate", status: "queued", error: undefined });
           resolve(uploadedUrl);
         }).catch((error) => {
@@ -330,6 +339,7 @@ export default function Editor() {
         }).finally(() => {
           activeBatchUploadsRef.current -= 1;
           batchUploadPromisesRef.current.delete(item.id);
+          batchUploadProgressRef.current.delete(item.id);
           pumpBatchUploads();
         });
       });
@@ -340,7 +350,8 @@ export default function Editor() {
   }
 
   function pumpBatchUploads() {
-    while (activeBatchUploadsRef.current < 4 && batchUploadQueueRef.current.length) {
+    // One upload at a time keeps large 50-image selections within mobile browser memory limits.
+    while (activeBatchUploadsRef.current < 1 && batchUploadQueueRef.current.length) {
       batchUploadQueueRef.current.shift()?.();
     }
   }
@@ -689,7 +700,7 @@ export default function Editor() {
           <div className="batchPane">
             <div className="batchToolbar"><strong>Selected images</strong><div>{batchItems.length > 0 && <button type="button" onClick={clearBatch} disabled={isProcessing}>Clear all</button>}<button type="button" onClick={() => batchInputRef.current?.click()} disabled={isProcessing || batchItems.length >= MAX_BATCH}>+ Add images</button></div></div>
             <input ref={batchInputRef} disabled={isProcessing} type="file" multiple accept="image/png,image/jpeg,image/webp" hidden onChange={(e: ChangeEvent<HTMLInputElement>) => { if (e.target.files) addBatchFiles(e.target.files); e.target.value = ""; }} />
-            {batchItems.length === 0 ? <div className="dropzone batchDropzone" onClick={() => batchInputRef.current?.click()} onDrop={batchDrop} onDragOver={(e) => e.preventDefault()} role="button" tabIndex={0}><UploadEmpty title={`Drop up to ${MAX_BATCH} images`} subtitle="One shared prompt will be applied to every image" button="Choose images" /></div> : <div className="batchGrid" onDrop={batchDrop} onDragOver={(e) => e.preventDefault()}>{batchItems.map((item, index) => <article key={item.id} className={`batchCard ${item.status}`}><div className="batchThumb"><img src={item.preview} alt={`Batch source ${index + 1}`} />{!batchBusy && <button type="button" onClick={() => removeBatchItem(item.id)} aria-label={`Remove image ${index + 1}`}>×</button>}</div><div className="batchCardMeta"><span>{index + 1}</span><div><strong>{item.status === "done" ? "Done" : item.status === "failed" ? "Failed" : item.label}</strong><div className="miniProgress"><i style={{ width: `${item.progress}%` }} /></div></div><b>{Math.round(item.progress)}%</b></div>{item.result && <div className="batchResultActions"><button type="button" onClick={() => downloadOne(item.result!, index + 1)}>↓ Download</button><a href={item.result} target="_blank" rel="noopener noreferrer">Open ↗</a></div>}</article>)}</div>}
+            {batchItems.length === 0 ? <div className="dropzone batchDropzone" onClick={() => batchInputRef.current?.click()} onDrop={batchDrop} onDragOver={(e) => e.preventDefault()} role="button" tabIndex={0}><UploadEmpty title={`Drop up to ${MAX_BATCH} images`} subtitle="One shared prompt will be applied to every image" button="Choose images" /></div> : <div className="batchGrid" onDrop={batchDrop} onDragOver={(e) => e.preventDefault()}>{batchItems.map((item, index) => <article key={item.id} className={`batchCard ${item.status}`}><div className="batchThumb"><img src={item.preview} alt={`Batch source ${index + 1}`} loading="lazy" decoding="async" />{!batchBusy && <button type="button" onClick={() => removeBatchItem(item.id)} aria-label={`Remove image ${index + 1}`}>×</button>}</div><div className="batchCardMeta"><span>{index + 1}</span><div><strong>{item.status === "done" ? "Done" : item.status === "failed" ? "Failed" : item.label}</strong><div className="miniProgress"><i style={{ width: `${item.progress}%` }} /></div></div><b>{Math.round(item.progress)}%</b></div>{item.result && <div className="batchResultActions"><button type="button" onClick={() => downloadOne(item.result!, index + 1)}>↓ Download</button><a href={item.result} target="_blank" rel="noopener noreferrer">Open ↗</a></div>}</article>)}</div>}
           </div>
           <div className="controls"><div className="controlHeading"><span className="step">02</span><h2>Shared batch prompt</h2></div><label className="promptLabel" htmlFor="batch-prompt">PROMPT FOR ALL IMAGES</label><textarea id="batch-prompt" value={batchPrompt} onChange={(e) => setBatchPrompt(e.target.value)} placeholder="Apply the same edit to every selected image…" maxLength={700} /><div className="promptMeta"><button type="button" onClick={() => setBatchPrompt("Give every image a clean cinematic color grade while preserving the subject and composition.")}>✦ Try an example</button><span>{batchPrompt.length}/700</span></div><RatioPicker value={batchRatio} onChange={setBatchRatio} /><PreserveControls preserveFace={preserveFace} preservePose={preservePose} onFace={setPreserveFace} onPose={setPreservePose} /><ProgressBar progress={batchProgress} /><button type="button" className="generate" disabled={!batchItems.length || !batchPrompt.trim() || batchBusy} onClick={generateBatch}>{batchBusy ? <><span className="spinner" /> Processing {batchDone}/{batchItems.length}</> : <>Generate {batchItems.length || ""} image{batchItems.length === 1 ? "" : "s"} <span>→</span></>}</button>{batchMessage && <p className="error">{batchMessage}</p>}<p className="fineprint">Each image is a separate V-Editor request and paid use.</p></div>
         </div>
