@@ -84,3 +84,6 @@ footer { max-width:1180px; margin:auto; padding:30px 28px 45px; border-top:1px s
 .undoClose{width:28px;height:28px;border-radius:50%;background:rgba(255,255,255,.1);color:#fff;font-size:18px;line-height:1}
 @keyframes undoIn{from{opacity:0;transform:translate(-50%,12px)}}
 @media(max-width:480px){.undoToast{bottom:16px;width:calc(100% - 28px);min-width:0}}
+
+.studioMulti .controls{min-width:0;overflow:hidden}
+.studioMulti .controls textarea,.studioMulti .controls .ratioPanel,.studioMulti .controls .preservePanel,.studioMulti .controls .progressBox{max-width:100%}

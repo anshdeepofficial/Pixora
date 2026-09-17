@@ -360,7 +360,7 @@ export default function BatchProcessingProgress() {
       <style>{`
         .pxBatchMini{position:fixed;z-index:9000;right:16px;bottom:16px;display:flex;align-items:center;gap:9px;max-width:min(340px,calc(100vw - 32px));padding:10px 13px;border:1px solid rgba(126,150,60,.55);border-radius:999px;background:rgba(23,61,45,.96);box-shadow:0 14px 38px rgba(20,24,19,.24);color:#f5f7ef;font:750 11px var(--font-manrope),Arial,sans-serif;cursor:pointer;backdrop-filter:blur(10px)}
         .pxBatchMini i{width:8px;height:8px;flex:0 0 auto;border-radius:50%;background:#c6f04a;box-shadow:0 0 0 4px rgba(198,240,74,.13);animation:pxMiniPulse 1.25s ease-in-out infinite}.pxBatchMini b{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.pxBatchMini span{color:#d8ed9b;font-size:13px}@keyframes pxMiniPulse{50%{opacity:.45;transform:scale(.82)}}
-        @media(max-width:620px){.pxBatchMini{right:12px;bottom:12px;max-width:calc(100vw - 24px)}}
+        @media(max-width:620px){.pxBatchMini{display:none}}
       `}</style>
       <button type="button" className="pxBatchMini" onClick={reopenProgress} aria-label="Reopen live batch progress"><i /><b>{shortStage(state)}</b><span>↑</span></button>
     </>;
@@ -385,7 +385,7 @@ export default function BatchProcessingProgress() {
       .pxBatchDetail{margin:7px 0 11px;color:#6e726b;font-size:10px;line-height:1.45}.pxBatchTrack{height:7px;overflow:hidden;border-radius:99px;background:#e1dfd7}.pxBatchTrack i{display:block;height:100%;border-radius:inherit;background:#73952d;transition:width .2s ease}.pxBatchTrack.indeterminate i{width:38%;animation:pxBatchSweep 1.15s ease-in-out infinite}.pxBatchProgress.error .pxBatchTrack i{background:#b95242}.pxBatchProgress.complete .pxBatchTrack i{width:100%;background:#5e8a2c}
       .pxBatchStages{display:grid;grid-template-columns:repeat(4,1fr);gap:5px;margin-top:12px}.pxBatchStage{min-width:0;padding:7px 5px;border:1px solid #ddd9cf;border-radius:9px;background:#f7f5ef;text-align:center;color:#9a9c96;font-size:8px;font-weight:750;line-height:1.25}.pxBatchStage.done{border-color:#d6e5aa;background:#f0f6df;color:#547126}.pxBatchStage.active{border-color:#7e963c;background:#173d2d;color:#d7f47c}.pxBatchStage span{display:block;margin-bottom:2px;font-size:10px}.pxBatchNumbers{display:flex;gap:10px;margin-top:10px;color:#82857f;font-size:9px}.pxBatchNumbers b{color:#173d2d}
       @keyframes pxBatchSweep{0%{transform:translateX(-110%)}50%{transform:translateX(100%)}100%{transform:translateX(260%)}}
-      @media(max-width:620px){.pxBatchProgress{left:12px;right:12px;bottom:12px;width:auto;border-radius:16px;padding:14px}.pxBatchStages{gap:4px}.pxBatchStage{font-size:7.5px;padding:6px 3px}.pxBatchRequest{font-size:8px}.pxBatchClose{width:25px;height:25px}}
+      @media(max-width:620px){.pxBatchProgress{display:none}}
     `}</style>
     <div className="pxBatchProgressHead">
       <div><small>LIVE BATCH PROCESSING</small><strong>{state.title}</strong></div>

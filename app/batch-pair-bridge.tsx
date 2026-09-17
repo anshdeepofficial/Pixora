@@ -49,7 +49,7 @@ const MAX_CANVAS_SIDE = 3072;
 const MAX_CANVAS_PIXELS = 8_500_000;
 const FACE_LOCK_MARKER = "Preserve the exact facial identity";
 const POSE_LOCK_MARKER = "Preserve the exact body pose";
-const BATCH_DIRECTIVE = "BATCH COLLAGE: The input is a simple two-panel collage made from two separate, uncropped source photos. The user's instruction above is the primary edit request. Treat each panel as an independent image and apply that same requested edit separately to each panel. Never merge, blend, swap, copy, or transfer faces, identities, hair, bodies, clothes, poses, backgrounds, or objects between panels. Keep each subject in its own panel. Do not invent a third person. Keep the panel boundary and each panel's complete framing stable.";
+const BATCH_DIRECTIVE = "BATCH COLLAGE: The input is a simple two-panel collage made from two separate, uncropped source photos. The user's instruction above is the primary edit request. Treat each panel as an independent image and apply that same requested edit separately to each panel. IMPORTANT: if the user's wording refers to one person or character in the singular, apply that instruction consistently and independently to EVERY visible person or character inside each panel, unless the user explicitly identifies someone to exclude. Do not leave a second person unchanged merely because the prompt uses singular wording. Never merge, blend, swap, copy, or transfer faces, identities, hair, bodies, clothes, poses, backgrounds, or objects between panels. Keep each subject in its own panel. Do not invent a third person. Keep the panel boundary and each panel's complete framing stable.";
 const FACE_PANEL_DIRECTIVE = "FACE LOCK FOR COLLAGE: For each panel independently, preserve that panel's original person's recognizable identity with very high priority. Keep facial structure, eyes, nose, lips, skin tone, age appearance, hairstyle, hairline, and other unique identity features consistent. Never use the face or identity from the other panel.";
 const POSE_PANEL_DIRECTIVE = "POSE LOCK FOR COLLAGE: For each panel independently, preserve that panel's original head angle, body pose, limb positions, gaze direction, camera angle, crop, framing, and composition unless the user's primary edit explicitly makes a small change unavoidable. Never copy the pose from the other panel.";
 
@@ -339,6 +339,19 @@ export default function BatchPairBridge() {
     persistSyntheticTasks(syntheticTasks);
     const splitPromises = new Map<string, Promise<string[]>>();
     const pollCache = new Map<string, { at: number; data: TaskPoll; ok: boolean; status: number }>();
+    const splitWaiters: Array<() => void> = [];
+    const splitLimit = window.matchMedia("(max-width: 800px)").matches ? 1 : 2;
+    let activeSplits = 0;
+
+    const withSplitSlot = async <T,>(worker: () => Promise<T>) => {
+      if (activeSplits >= splitLimit) await new Promise<void>((resolve) => splitWaiters.push(resolve));
+      activeSplits += 1;
+      try { return await worker(); }
+      finally {
+        activeSplits -= 1;
+        splitWaiters.shift()?.();
+      }
+    };
 
     const pollRealTask = async (realTaskId: string) => {
       const cached = pollCache.get(realTaskId);
@@ -503,7 +516,7 @@ export default function BatchPairBridge() {
         if (!splitPromise) {
           const siblingEntries = Array.from(syntheticTasks.values()).filter((item) => item.realTaskId === entry.realTaskId).sort((a, b) => a.panelIndex - b.panelIndex);
           const crops = siblingEntries.map((item) => item.crop);
-          splitPromise = splitAndPersist(polled.data.output[0], crops, entry.pairKey, originalFetch);
+          splitPromise = withSplitSlot(() => splitAndPersist(polled.data.output![0], crops, entry.pairKey, originalFetch));
           splitPromises.set(entry.realTaskId, splitPromise);
         }
 

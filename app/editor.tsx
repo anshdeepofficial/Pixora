@@ -61,6 +61,20 @@ function validImage(file?: File | null) {
   return Boolean(file && ["image/png", "image/jpeg", "image/webp"].includes(file.type) && file.size <= MAX_FILE_BYTES);
 }
 
+async function mapLimit<T, R>(items: T[], limit: number, worker: (item: T, index: number) => Promise<R>) {
+  const results = new Array<R>(items.length);
+  let cursor = 0;
+  async function run() {
+    while (true) {
+      const index = cursor++;
+      if (index >= items.length) return;
+      results[index] = await worker(items[index], index);
+    }
+  }
+  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, () => run()));
+  return results;
+}
+
 function applyPreservation(prompt: string, preserveFace: boolean, preservePose: boolean, referenceMode = false) {
   const constraints: string[] = [];
   if (preserveFace) constraints.push("Preserve the exact facial identity of every person from the main/input image: keep facial structure, features, skin tone, age, hairstyle, and recognizable identity unchanged. Do not replace, redesign, beautify, or morph the face.");
@@ -342,7 +356,7 @@ export default function Editor() {
     setBatchBusy(true); setBatchMessage(""); setOutputTab("result");
     setBatchItems((current) => current.map((item) => ({ ...item, uploadedUrl: undefined, taskId: undefined, result: undefined, error: undefined, progress: 1, label: "Starting upload…", status: "uploading" })));
     try {
-      const uploadResults = await Promise.all(batchItems.map(async (item) => {
+      const uploadResults = await mapLimit(batchItems, 4, async (item) => {
         try {
           const uploadedUrl = await uploadImage(item.file, (percentage) => updateBatchItem(item.id, { progress: Math.max(1, percentage * 0.45), label: `Uploading · ${Math.round(percentage)}%`, status: "uploading" }));
           updateBatchItem(item.id, { uploadedUrl, progress: 48, label: "Uploaded · creating task", status: "queued" });
@@ -352,7 +366,7 @@ export default function Editor() {
           updateBatchItem(item.id, { progress: 100, label: detail, status: "failed", error: detail });
           return { id: item.id, error: detail };
         }
-      }));
+      });
 
       const successfulUploads = uploadResults.filter((item): item is { id: string; uploadedUrl: string } => "uploadedUrl" in item);
       if (!successfulUploads.length) throw new Error("All uploads failed.");
@@ -362,7 +376,7 @@ export default function Editor() {
       if (!create.ok && !created.tasks) throw new Error(created.error || "Could not start batch generation");
       const tasks = created.tasks || [];
 
-      await Promise.all(tasks.map(async (task) => {
+      await mapLimit(tasks, 8, async (task) => {
         const source = successfulUploads[task.index];
         if (!source) return;
         if (!task.taskId) {
@@ -379,7 +393,7 @@ export default function Editor() {
           const detail = error instanceof Error ? error.message : "Generation failed";
           updateBatchItem(source.id, { progress: 100, label: detail, status: "failed", error: detail });
         }
-      }));
+      });
 
       try {
         const statsResponse = await fetch("/api/stats", { cache: "no-store" });

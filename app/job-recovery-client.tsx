@@ -404,7 +404,11 @@ export default function JobRecoveryClient() {
         tasks: [],
       };
       commit(next);
-      void blobsFromSources(sources).then((files) => storeRecoveryFiles(id, files)).catch(() => undefined);
+      // Avoid duplicating dozens of full-size source blobs in memory during a large mobile batch.
+      // Uploaded URLs and task IDs still make the job refresh-safe after submission.
+      if (sources.length <= 10) {
+        void blobsFromSources(sources).then((files) => storeRecoveryFiles(id, files)).catch(() => undefined);
+      }
     };
 
     document.addEventListener("click", onGenerateIntent, true);
