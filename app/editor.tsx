@@ -6,7 +6,7 @@ import { upload } from "@vercel/blob/client";
 const ratios = ["default", "1:1", "3:2", "2:3", "9:16", "16:9", "3:4", "4:3"];
 const MAX_BATCH = 50;
 const MAX_FILE_BYTES = 12 * 1024 * 1024;
-const APP_VERSION = "1.0.2";
+const APP_VERSION = "1.1.0";
 const APP_VERSION_KEY = "pixora-app-version";
 
 type Mode = "single" | "batch" | "reference";
@@ -213,7 +213,7 @@ export default function Editor() {
   const batchProgress: ProgressState = batchItems.length && (batchBusy || batchOverall > 0) ? {
     percent: batchOverall,
     state: batchBusy ? "working" : batchFailed === batchItems.length ? "error" : batchDone > 0 ? "done" : "idle",
-    label: batchBusy ? `${batchDone} of ${batchItems.length} completed${batchFailed ? ` · ${batchFailed} failed` : ""}` : batchDone === batchItems.length ? `All ${batchDone} images completed` : `${batchUploaded}/${batchItems.length} uploaded in background · generation not started`,
+    label: batchBusy ? `${batchDone} of ${batchItems.length} completed${batchFailed ? ` · ${batchFailed} failed` : ""}` : batchDone === batchItems.length ? `All ${batchDone} images completed` : `${batchUploaded}/${batchItems.length} uploaded · generation not started`,
   } : { percent: 0, label: "", state: "idle" };
 
   useEffect(() => {
@@ -455,7 +455,7 @@ export default function Editor() {
       const uploadResults = await mapLimit(items, 4, async (item) => {
         try {
           const uploadedUrl = item.uploadedUrl || await startBatchUpload(item);
-          updateBatchItem(item.id, { uploadedUrl, progress: 48, label: "Uploaded · entering live pipeline", status: "queued" });
+          updateBatchItem(item.id, { uploadedUrl, progress: 48, label: "Uploaded · creating individual task", status: "queued" });
           return { id: item.id, uploadedUrl };
         } catch (error) {
           const detail = error instanceof Error ? error.message : "Upload failed";
@@ -715,7 +715,7 @@ export default function Editor() {
             <input ref={batchInputRef} disabled={isProcessing} type="file" multiple accept="image/png,image/jpeg,image/webp" hidden onChange={(e: ChangeEvent<HTMLInputElement>) => { if (e.target.files) addBatchFiles(e.target.files); e.target.value = ""; }} />
             {batchItems.length === 0 ? <div className="dropzone batchDropzone" onClick={() => batchInputRef.current?.click()} onDrop={batchDrop} onDragOver={(e) => e.preventDefault()} role="button" tabIndex={0}><UploadEmpty title={`Drop up to ${MAX_BATCH} images`} subtitle="One shared prompt will be applied to every image" button="Choose images" /></div> : <div className="batchGrid" onDrop={batchDrop} onDragOver={(e) => e.preventDefault()}>{batchItems.map((item, index) => <article key={item.id} className={`batchCard ${item.status}`}><div className="batchThumb"><img src={item.preview} alt={`Batch source ${index + 1}`} loading="lazy" decoding="async" />{!batchBusy && <button type="button" onClick={() => removeBatchItem(item.id)} aria-label={`Remove image ${index + 1}`}>×</button>}</div><div className="batchCardMeta"><span>{index + 1}</span><div><strong>{item.status === "done" ? "Done" : item.status === "failed" ? "Failed" : item.label}</strong><div className="miniProgress"><i style={{ width: `${item.progress}%` }} /></div></div><b>{Math.round(item.progress)}%</b></div>{item.result && <div className="batchResultActions"><button type="button" onClick={() => downloadOne(item.result!, index + 1)}>↓ Download</button><a href={item.result} target="_blank" rel="noopener noreferrer">Open ↗</a></div>}</article>)}</div>}
           </div>
-          <div className="controls"><div className="controlHeading"><span className="step">02</span><h2>Shared batch prompt</h2></div><label className="promptLabel" htmlFor="batch-prompt">PROMPT FOR ALL IMAGES</label><textarea id="batch-prompt" value={batchPrompt} onChange={(e) => setBatchPrompt(e.target.value)} placeholder="Apply the same edit to every selected image…" maxLength={700} /><div className="promptMeta"><button type="button" onClick={() => setBatchPrompt("Give every image a clean cinematic color grade while preserving the subject and composition.")}>✦ Try an example</button><span>{batchPrompt.length}/700</span></div><RatioPicker value={batchRatio} onChange={setBatchRatio} /><PreserveControls preserveFace={preserveFace} preservePose={preservePose} onFace={setPreserveFace} onPose={setPreservePose} /><ProgressBar progress={batchProgress} /><button type="button" className="generate" disabled={!batchItems.length || !batchPrompt.trim() || batchBusy} onClick={generateBatch}>{batchBusy ? <><span className="spinner" /> Processing {batchDone}/{batchItems.length}</> : <>Generate {batchItems.length || ""} image{batchItems.length === 1 ? "" : "s"} <span>→</span></>}</button>{batchMessage && <p className="error">{batchMessage}</p>}<p className="fineprint">Each image is a separate V-Editor request and paid use.</p></div>
+          <div className="controls"><div className="controlHeading"><span className="step">02</span><h2>Shared batch prompt</h2></div><label className="promptLabel" htmlFor="batch-prompt">PROMPT FOR ALL IMAGES</label><textarea id="batch-prompt" value={batchPrompt} onChange={(e) => setBatchPrompt(e.target.value)} placeholder="Apply the same edit to every selected image…" maxLength={700} /><div className="promptMeta"><button type="button" onClick={() => setBatchPrompt("Give every image a clean cinematic color grade while preserving the subject and composition.")}>✦ Try an example</button><span>{batchPrompt.length}/700</span></div><RatioPicker value={batchRatio} onChange={setBatchRatio} /><PreserveControls preserveFace={preserveFace} preservePose={preservePose} onFace={setPreserveFace} onPose={setPreservePose} /><ProgressBar progress={batchProgress} /><button type="button" className="generate" disabled={!batchItems.length || !batchPrompt.trim() || batchBusy} onClick={generateBatch}>{batchBusy ? <><span className="spinner" /> Processing {batchDone}/{batchItems.length}</> : <>Generate {batchItems.length || ""} image{batchItems.length === 1 ? "" : "s"} <span>→</span></>}</button>{batchMessage && <p className="error">{batchMessage}</p>}<p className="fineprint">Each image is sent to V-Editor as its own independent request.</p></div>
         </div>
       </>}
 
@@ -786,7 +786,7 @@ export default function Editor() {
       undoSwipeStart.current = null;
     }}><span>Image removed</span><button type="button" className="undoAction" onClick={undoHistoryRemoval}>Undo</button><button type="button" className="undoClose" onClick={dismissUndo} aria-label="Dismiss undo message">×</button></div>}
 
-    <section className="how" id="how"><p className="eyebrow">THREE WAYS TO CREATE</p><h2>One editor.<br />Three flexible workflows.</h2><div className="howGrid"><article><span>01</span><h3>Single</h3><p>Edit one image with a direct natural-language instruction.</p></article><article><span>02</span><h3>Batch</h3><p>Apply one shared prompt to as many as {MAX_BATCH} images in one run.</p></article><article><span>03</span><h3>Reference</h3><p>Guide a main image with a second visual reference plus your prompt.</p></article></div></section>
+    <section className="how" id="how"><p className="eyebrow">THREE WAYS TO CREATE</p><h2>One editor.<br />Three flexible workflows.</h2><div className="howGrid"><article><span>01</span><h3>Single</h3><p>Edit one image with a direct natural-language instruction.</p></article><article><span>02</span><h3>Batch</h3><p>Apply one shared prompt to as many as {MAX_BATCH} images in one run. Every image is processed independently.</p></article><article><span>03</span><h3>Reference</h3><p>Guide a main image with a second visual reference plus your prompt.</p></article></div></section>
     <footer><a className="brand" href="#top"><span className="brandMark">P</span><span>Pixora</span><small className="versionBadge">v{APP_VERSION}</small></a><p>AI editing, without the complexity.</p><span>Powered by VModel V-Editor</span></footer>
   </main>;
 }
