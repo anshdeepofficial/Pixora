@@ -10,6 +10,20 @@ type BatchBody = {
   resultResolutions?: number[];
 };
 
+async function mapLimit<T, R>(items: T[], limit: number, worker: (item: T, index: number) => Promise<R>) {
+  const results = new Array<R>(items.length);
+  let cursor = 0;
+  async function run() {
+    while (true) {
+      const index = cursor++;
+      if (index >= items.length) return;
+      results[index] = await worker(items[index], index);
+    }
+  }
+  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, () => run()));
+  return results;
+}
+
 export async function POST(request: Request) {
   const body = await request.json() as BatchBody;
   const imageUrls = Array.isArray(body.imageUrls) ? body.imageUrls : [];
@@ -26,7 +40,8 @@ export async function POST(request: Request) {
     return Response.json({ error: "No usable VModel API key is available. Add another API in Pixora Control." }, { status: 503 });
   }
 
-  const tasks = await Promise.all(imageUrls.map(async (imageUrl, index) => {
+  // A bounded create window prevents VModel rate-limit bursts when a large batch starts.
+  const tasks = await mapLimit(imageUrls, 4, async (imageUrl, index) => {
     const context = allocations[index];
     if (!context) return { index, error: "No queued API key has remaining generation capacity." };
     try {
@@ -44,7 +59,7 @@ export async function POST(request: Request) {
     } catch (error) {
       return { index, error: error instanceof Error ? error.message : "Could not start generation." };
     }
-  }));
+  });
 
   if (!tasks.some((task) => "taskId" in task)) {
     return Response.json({ error: "VModel could not start any batch tasks.", tasks }, { status: 502 });

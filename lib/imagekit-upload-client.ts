@@ -97,7 +97,15 @@ async function uploadToImageKit(pathname: string, file: File, options: UploadOpt
 }
 
 export async function upload(pathname: string, file: File, options: UploadOptions = {}) {
-  const uploaded = await uploadToImageKit(pathname, file, options, "/pixora-inputs", "pixora-input", "12mb");
+  const isPair = pathname.startsWith("pixora-inputs/pairs/");
+  const uploaded = await uploadToImageKit(
+    pathname,
+    file,
+    options,
+    "/pixora-inputs",
+    isPair ? "pixora-input,pixora-pair" : "pixora-input",
+    isPair ? "25mb" : "12mb",
+  );
   scheduleCleanup(uploaded.fileId!);
 
   return {

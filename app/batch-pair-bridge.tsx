@@ -42,13 +42,14 @@ const SYNTHETIC_TASK_KEY = "pixora-synthetic-pair-tasks-v1";
 const BRIDGE_BATCH_KEY = "pixora-bridge-last-batch-v1";
 const SYNTHETIC_TTL = 24 * 60 * 60 * 1000;
 const SEAM = 8;
+const MAX_PAIR_UPLOAD_BYTES = 24 * 1024 * 1024;
 // 3072 is large enough to keep two typical 1080p sources at or near their native pixel size,
 // while keeping PNG encoding/upload memory reasonable on mobile browsers.
 const MAX_CANVAS_SIDE = 3072;
 const MAX_CANVAS_PIXELS = 8_500_000;
 const FACE_LOCK_MARKER = "Preserve the exact facial identity";
 const POSE_LOCK_MARKER = "Preserve the exact body pose";
-const BATCH_DIRECTIVE = "BATCH COLLAGE: The input is a simple two-panel collage made from two separate source photos. The user's instruction above is the primary edit request. Treat each panel as an independent image and apply that same requested edit separately to each panel. Never merge, blend, swap, copy, or transfer faces, identities, hair, bodies, clothes, poses, backgrounds, or objects between panels. Keep each subject in its own panel. Do not invent a third person. Keep the panel boundary stable. If neutral padding exists only to preserve a requested output ratio, extend that panel's own photo naturally into its padding without borrowing content from the other panel.";
+const BATCH_DIRECTIVE = "BATCH COLLAGE: The input is a simple two-panel collage made from two separate, uncropped source photos. The user's instruction above is the primary edit request. Treat each panel as an independent image and apply that same requested edit separately to each panel. Never merge, blend, swap, copy, or transfer faces, identities, hair, bodies, clothes, poses, backgrounds, or objects between panels. Keep each subject in its own panel. Do not invent a third person. Keep the panel boundary and each panel's complete framing stable.";
 const FACE_PANEL_DIRECTIVE = "FACE LOCK FOR COLLAGE: For each panel independently, preserve that panel's original person's recognizable identity with very high priority. Keep facial structure, eyes, nose, lips, skin tone, age appearance, hairstyle, hairline, and other unique identity features consistent. Never use the face or identity from the other panel.";
 const POSE_PANEL_DIRECTIVE = "POSE LOCK FOR COLLAGE: For each panel independently, preserve that panel's original head angle, body pose, limb positions, gaze direction, camera angle, crop, framing, and composition unless the user's primary edit explicitly makes a small change unavoidable. Never copy the pose from the other panel.";
 
@@ -62,12 +63,6 @@ function requestMethod(input: RequestInfo | URL, init?: RequestInit) {
   if (init?.method) return init.method.toUpperCase();
   if (typeof Request !== "undefined" && input instanceof Request) return input.method.toUpperCase();
   return "GET";
-}
-
-function parseRatio(value?: string) {
-  if (!value || value === "default") return null;
-  const [w, h] = value.split(":").map(Number);
-  return Number.isFinite(w) && Number.isFinite(h) && w > 0 && h > 0 ? w / h : null;
 }
 
 function emitPairProgress(progress: PairProgress) {
@@ -204,20 +199,13 @@ function chooseCompactLayout(a: PanelSize, b: PanelSize) {
   return scaleLayout(raw.width, raw.height, raw.panels);
 }
 
-function panelSizeForSource(bitmap: ImageBitmap, targetRatio: number | null): PanelSize {
-  if (!targetRatio) return { width: bitmap.width, height: bitmap.height };
-
-  // Build the smallest requested-ratio frame that contains the full source at native size.
-  // This creates padding only when the user explicitly asks for a different output ratio.
-  const sourceRatio = bitmap.width / bitmap.height;
-  if (sourceRatio > targetRatio) {
-    return { width: bitmap.width, height: Math.max(bitmap.height, Math.ceil(bitmap.width / targetRatio)) };
-  }
-  return { width: Math.max(bitmap.width, Math.ceil(bitmap.height * targetRatio)), height: bitmap.height };
-}
-
-function choosePanels(a: ImageBitmap, b: ImageBitmap, targetRatio: number | null) {
-  return chooseCompactLayout(panelSizeForSource(a, targetRatio), panelSizeForSource(b, targetRatio));
+function choosePanels(a: ImageBitmap, b: ImageBitmap) {
+  // The temporary collage must not apply the requested result ratio to either source.
+  // Each panel therefore keeps the source image's complete, uncropped aspect ratio.
+  return chooseCompactLayout(
+    { width: a.width, height: a.height },
+    { width: b.width, height: b.height },
+  );
 }
 
 function drawContained(context: CanvasRenderingContext2D, bitmap: ImageBitmap, panel: Panel) {
@@ -247,7 +235,6 @@ function buildPairPrompt(prompt: string) {
 async function makeComposite(
   sourceA: string,
   sourceB: string,
-  ratio: string,
   originalFetch: typeof window.fetch,
   onProgress?: (percent: number, detail: string) => void,
 ) {
@@ -255,7 +242,7 @@ async function makeComposite(
   const [a, b] = await Promise.all([fetchBitmap(sourceA, originalFetch), fetchBitmap(sourceB, originalFetch)]);
   try {
     onProgress?.(20, "Choosing a no-crop layout from the original dimensions…");
-    const layout = choosePanels(a, b, parseRatio(ratio));
+    const layout = choosePanels(a, b);
     const canvas = document.createElement("canvas");
     canvas.width = layout.width;
     canvas.height = layout.height;
@@ -271,9 +258,16 @@ async function makeComposite(
     drawContained(context, a, layout.panels[0]);
     drawContained(context, b, layout.panels[1]);
 
-    onProgress?.(42, `Building lossless ${canvas.width}×${canvas.height} PNG collage…`);
-    const blob = await canvasBlob(canvas, "image/png");
-    const file = new File([blob], `pixora-pair-${crypto.randomUUID()}.png`, { type: "image/png" });
+    onProgress?.(42, `Building no-crop ${canvas.width}×${canvas.height} collage…`);
+    let blob = await canvasBlob(canvas, "image/png");
+    let extension = "png";
+    // Keep normal pairs lossless. Only unusually detailed PNGs that exceed the safe upload
+    // size use a visually lossless transport fallback instead of failing before V-Editor.
+    if (blob.size > MAX_PAIR_UPLOAD_BYTES) {
+      blob = await canvasBlob(canvas, "image/jpeg", 0.98);
+      extension = "jpg";
+    }
+    const file = new File([blob], `pixora-pair-${crypto.randomUUID()}.${extension}`, { type: blob.type });
 
     onProgress?.(55, "Uploading the lossless smart batch…");
     const uploaded = await upload(`pixora-inputs/pairs/${Date.now()}-${file.name}`, file, {
@@ -400,7 +394,6 @@ export default function BatchPairBridge() {
             const composite = await makeComposite(
               sourceA,
               sourceB,
-              payload.aspectRatio || "default",
               originalFetch,
               (percent, detail) => reportGroupProgress(groupIndex, percent, detail),
             );
@@ -409,9 +402,9 @@ export default function BatchPairBridge() {
               imageUrl: composite.imageUrl,
               crops: composite.crops,
               aspectRatio: "default",
-              // Highest V-Editor result resolution is important because the single returned canvas
-              // is split into two final images afterwards.
-              resultResolution: 2,
+              // Balanced resolution avoids the long processing and failures caused by forcing
+              // maximum resolution on every paired request.
+              resultResolution: 1,
               prompt: buildPairPrompt(payload.prompt!),
             };
           } catch (error) {
@@ -538,7 +531,7 @@ export default function BatchPairBridge() {
     const updateBatchCopy = () => {
       document.querySelectorAll<HTMLElement>(".fineprint").forEach((node) => {
         if (node.textContent?.includes("Each image is a separate V-Editor request") || node.textContent?.includes("Smart pairing uses") || node.textContent?.includes("Lossless smart pairing uses")) {
-          node.textContent = "Lossless local pairing uses 1 V-Editor request for every 2 batch images · paired outputs use maximum V-Editor resolution.";
+          node.textContent = "No-crop local pairing uses 1 V-Editor request for every 2 batch images · original aspect ratios are preserved.";
         }
       });
       document.querySelectorAll<HTMLElement>(".privacy").forEach((node) => {
