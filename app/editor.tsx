@@ -6,14 +6,14 @@ import { upload } from "@vercel/blob/client";
 const ratios = ["default", "1:1", "3:2", "2:3", "9:16", "16:9", "3:4", "4:3"];
 const MAX_BATCH = 50;
 const MAX_FILE_BYTES = 12 * 1024 * 1024;
-const APP_VERSION = "1.1.1";
+const APP_VERSION = "1.1.2";
 const APP_VERSION_KEY = "pixora-app-version";
 
 type Mode = "single" | "batch" | "reference";
 type OutputTab = "result" | "history";
 type ProgressState = { percent: number; label: string; state: "idle" | "working" | "done" | "error" };
 type HistoryItem = { url: string; prompt: string; createdAt: string };
-type BatchStatus = "ready" | "uploading" | "queued" | "processing" | "done" | "failed";
+type BatchStatus = "ready" | "uploading" | "queued" | "processing" | "done" | "failed" | "stopped";
 type BatchItem = {
   id: string;
   file?: File;
@@ -111,6 +111,8 @@ export default function Editor() {
   const [batchPrompt, setBatchPrompt] = useState("");
   const [batchRatio, setBatchRatio] = useState("default");
   const [batchBusy, setBatchBusy] = useState(false);
+  const [batchStopRequested, setBatchStopRequested] = useState(false);
+  const batchStopRequestedRef = useRef(false);
   const [batchMessage, setBatchMessage] = useState("");
   const [batchDownloading, setBatchDownloading] = useState(false);
   const batchItemsRef = useRef<BatchItem[]>([]);
@@ -208,12 +210,21 @@ export default function Editor() {
   const batchOverall = useMemo(() => batchItems.length ? Math.round(batchItems.reduce((sum, item) => sum + item.progress, 0) / batchItems.length) : 0, [batchItems]);
   const batchDone = batchItems.filter((item) => item.status === "done").length;
   const batchFailed = batchItems.filter((item) => item.status === "failed").length;
+  const batchStopped = batchItems.filter((item) => item.status === "stopped").length;
   const batchUploaded = batchItems.filter((item) => item.uploadedUrl).length;
   const batchResults = batchItems.filter((item) => item.result).map((item) => item.result!);
   const batchProgress: ProgressState = batchItems.length && (batchBusy || batchOverall > 0) ? {
     percent: batchOverall,
     state: batchBusy ? "working" : batchFailed === batchItems.length ? "error" : batchDone > 0 ? "done" : "idle",
-    label: batchBusy ? `${batchDone} of ${batchItems.length} completed${batchFailed ? ` · ${batchFailed} failed` : ""}` : batchDone === batchItems.length ? `All ${batchDone} images completed` : `${batchUploaded}/${batchItems.length} uploaded · generation not started`,
+    label: batchBusy
+      ? batchStopRequested
+        ? `Stopping safely · ${batchDone} completed${batchFailed ? ` · ${batchFailed} failed` : ""}`
+        : `${batchDone} of ${batchItems.length} completed${batchFailed ? ` · ${batchFailed} failed` : ""}`
+      : batchStopped
+        ? `Stopped · ${batchDone} completed · ${batchStopped} not processed`
+        : batchDone === batchItems.length
+          ? `All ${batchDone} images completed`
+          : `${batchUploaded}/${batchItems.length} uploaded · generation not started`,
   } : { percent: 0, label: "", state: "idle" };
 
   useEffect(() => {
@@ -440,10 +451,30 @@ export default function Editor() {
     } finally { setReferenceBusy(false); }
   }
 
+  function requestBatchStop() {
+    if (!batchBusy || batchStopRequestedRef.current) return;
+
+    const firstConfirmed = window.confirm(
+      "Stop this batch? Pixora will not start any more images after the current step."
+    );
+    if (!firstConfirmed) return;
+
+    const secondConfirmed = window.confirm(
+      "Confirm stop again. Any V-Editor task already accepted will be allowed to finish so its result and credit are not wasted. Remaining images will not be generated."
+    );
+    if (!secondConfirmed) return;
+
+    batchStopRequestedRef.current = true;
+    setBatchStopRequested(true);
+    setBatchMessage("Stop requested. Finishing any already-started V-Editor task, then the batch will stop.");
+  }
+
   async function generateBatch() {
     if (!batchItems.length || !batchPrompt.trim()) { setBatchMessage("Add at least one image and enter a shared prompt."); return; }
     if (batchItems.length > MAX_BATCH) { setBatchMessage(`Maximum ${MAX_BATCH} images per batch.`); return; }
 
+    batchStopRequestedRef.current = false;
+    setBatchStopRequested(false);
     setBatchBusy(true);
     setBatchMessage("");
     setOutputTab("result");
@@ -472,6 +503,8 @@ export default function Editor() {
       // upload -> create V-Editor task -> poll -> show result -> release local source -> next.
       // The first result therefore does not wait for the other 49 uploads.
       for (let index = 0; index < itemIds.length; index++) {
+        if (batchStopRequestedRef.current) break;
+
         const id = itemIds[index];
         const item = batchItemsRef.current.find((entry) => entry.id === id);
         if (!item) continue;
@@ -489,6 +522,12 @@ export default function Editor() {
           // Once Vercel/ImageKit has the source, do not keep the original File/blob URL alive.
           // This is the key memory release for large 50-image selections.
           releaseBatchLocalSource(id, uploadedUrl);
+
+          if (batchStopRequestedRef.current) {
+            updateBatchItem(id, { uploadedUrl, progress: 48, label: "Stopped before AI generation", status: "stopped" });
+            break;
+          }
+
           updateBatchItem(id, { uploadedUrl, progress: 50, label: "Creating V-Editor task…", status: "queued" });
 
           // Submit only this image. Never build a 50-URL request or wait for all uploads first.
@@ -524,6 +563,19 @@ export default function Editor() {
           const detail = error instanceof Error ? error.message : "Generation failed";
           updateBatchItem(id, { progress: 100, label: detail, status: "failed", error: detail });
         }
+      }
+
+      if (batchStopRequestedRef.current) {
+        setBatchItems((current) => {
+          const next = current.map((item) => {
+            if (item.status === "done" || item.status === "failed" || item.status === "stopped") return item;
+            return { ...item, status: "stopped" as BatchStatus, label: "Stopped · not processed" };
+          });
+          batchItemsRef.current = next;
+          return next;
+        });
+        const completed = batchItemsRef.current.filter((item) => item.status === "done").length;
+        setBatchMessage(`Batch stopped. ${completed} image${completed === 1 ? "" : "s"} completed; remaining images were not started.`);
       }
 
       try {
@@ -750,9 +802,9 @@ export default function Editor() {
           <div className="batchPane">
             <div className="batchToolbar"><strong>Selected images</strong><div>{batchItems.length > 0 && <button type="button" onClick={clearBatch} disabled={isProcessing}>Clear all</button>}<button type="button" onClick={() => batchInputRef.current?.click()} disabled={isProcessing || batchItems.length >= MAX_BATCH}>+ Add images</button></div></div>
             <input ref={batchInputRef} disabled={isProcessing} type="file" multiple accept="image/png,image/jpeg,image/webp" hidden onChange={(e: ChangeEvent<HTMLInputElement>) => { if (e.target.files) addBatchFiles(e.target.files); e.target.value = ""; }} />
-            {batchItems.length === 0 ? <div className="dropzone batchDropzone" onClick={() => batchInputRef.current?.click()} onDrop={batchDrop} onDragOver={(e) => e.preventDefault()} role="button" tabIndex={0}><UploadEmpty title={`Drop up to ${MAX_BATCH} images`} subtitle="One shared prompt will be applied to every image" button="Choose images" /></div> : <div className="batchGrid" onDrop={batchDrop} onDragOver={(e) => e.preventDefault()}>{batchItems.map((item, index) => <article key={item.id} className={`batchCard ${item.status}`}><div className="batchThumb"><img src={item.result || item.preview} alt={item.result ? `Generated result ${index + 1}` : `Batch source ${index + 1}`} loading="lazy" decoding="async" />{!batchBusy && <button type="button" onClick={() => removeBatchItem(item.id)} aria-label={`Remove image ${index + 1}`}>×</button>}</div><div className="batchCardMeta"><span>{index + 1}</span><div><strong>{item.status === "done" ? "Done" : item.status === "failed" ? "Failed" : item.label}</strong><div className="miniProgress"><i style={{ width: `${item.progress}%` }} /></div></div><b>{Math.round(item.progress)}%</b></div>{item.result && <div className="batchResultActions"><button type="button" onClick={() => downloadOne(item.result!, index + 1)}>↓ Download</button><a href={item.result} target="_blank" rel="noopener noreferrer">Open ↗</a></div>}</article>)}</div>}
+            {batchItems.length === 0 ? <div className="dropzone batchDropzone" onClick={() => batchInputRef.current?.click()} onDrop={batchDrop} onDragOver={(e) => e.preventDefault()} role="button" tabIndex={0}><UploadEmpty title={`Drop up to ${MAX_BATCH} images`} subtitle="One shared prompt will be applied to every image" button="Choose images" /></div> : <div className="batchGrid" onDrop={batchDrop} onDragOver={(e) => e.preventDefault()}>{batchItems.map((item, index) => <article key={item.id} className={`batchCard ${item.status}`}><div className="batchThumb"><img src={item.result || item.preview} alt={item.result ? `Generated result ${index + 1}` : `Batch source ${index + 1}`} loading="lazy" decoding="async" />{!batchBusy && <button type="button" onClick={() => removeBatchItem(item.id)} aria-label={`Remove image ${index + 1}`}>×</button>}</div><div className="batchCardMeta"><span>{index + 1}</span><div><strong>{item.status === "done" ? "Done" : item.status === "failed" ? "Failed" : item.status === "stopped" ? "Stopped" : item.label}</strong><div className="miniProgress"><i style={{ width: `${item.progress}%` }} /></div></div><b>{Math.round(item.progress)}%</b></div>{item.result && <div className="batchResultActions"><button type="button" onClick={() => downloadOne(item.result!, index + 1)}>↓ Download</button><a href={item.result} target="_blank" rel="noopener noreferrer">Open ↗</a></div>}</article>)}</div>}
           </div>
-          <div className="controls"><div className="controlHeading"><span className="step">02</span><h2>Shared batch prompt</h2></div><label className="promptLabel" htmlFor="batch-prompt">PROMPT FOR ALL IMAGES</label><textarea id="batch-prompt" value={batchPrompt} onChange={(e) => setBatchPrompt(e.target.value)} placeholder="Apply the same edit to every selected image…" maxLength={700} /><div className="promptMeta"><button type="button" onClick={() => setBatchPrompt("Give every image a clean cinematic color grade while preserving the subject and composition.")}>✦ Try an example</button><span>{batchPrompt.length}/700</span></div><RatioPicker value={batchRatio} onChange={setBatchRatio} /><PreserveControls preserveFace={preserveFace} preservePose={preservePose} onFace={setPreserveFace} onPose={setPreservePose} /><ProgressBar progress={batchProgress} /><button type="button" className="generate" disabled={!batchItems.length || !batchPrompt.trim() || batchBusy} onClick={generateBatch}>{batchBusy ? <><span className="spinner" /> Processing {batchDone}/{batchItems.length}</> : <>Generate {batchItems.length || ""} image{batchItems.length === 1 ? "" : "s"} <span>→</span></>}</button>{batchMessage && <p className="error">{batchMessage}</p>}<p className="fineprint">Each image is sent to V-Editor as its own independent request.</p></div>
+          <div className="controls"><div className="controlHeading"><span className="step">02</span><h2>Shared batch prompt</h2></div><label className="promptLabel" htmlFor="batch-prompt">PROMPT FOR ALL IMAGES</label><textarea id="batch-prompt" value={batchPrompt} onChange={(e) => setBatchPrompt(e.target.value)} placeholder="Apply the same edit to every selected image…" maxLength={700} /><div className="promptMeta"><button type="button" onClick={() => setBatchPrompt("Give every image a clean cinematic color grade while preserving the subject and composition.")}>✦ Try an example</button><span>{batchPrompt.length}/700</span></div><RatioPicker value={batchRatio} onChange={setBatchRatio} /><PreserveControls preserveFace={preserveFace} preservePose={preservePose} onFace={setPreserveFace} onPose={setPreservePose} /><ProgressBar progress={batchProgress} /><div className="batchRunActions"><button type="button" className="generate" disabled={!batchItems.length || !batchPrompt.trim() || batchBusy} onClick={generateBatch}>{batchBusy ? <><span className="spinner" /> Processing {batchDone}/{batchItems.length}</> : <>Generate {batchItems.length || ""} image{batchItems.length === 1 ? "" : "s"} <span>→</span></>}</button>{batchBusy && <button type="button" className="stopBatch" disabled={batchStopRequested} onClick={requestBatchStop}>{batchStopRequested ? "Stopping…" : "■ Stop"}</button>}</div>{batchMessage && <p className="error">{batchMessage}</p>}<p className="fineprint">Each image is sent to V-Editor as its own independent request.</p></div>
         </div>
       </>}
 
