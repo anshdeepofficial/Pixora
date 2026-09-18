@@ -6,7 +6,7 @@ import { upload } from "@vercel/blob/client";
 const ratios = ["default", "1:1", "3:2", "2:3", "9:16", "16:9", "3:4", "4:3"];
 const MAX_BATCH = 50;
 const MAX_FILE_BYTES = 12 * 1024 * 1024;
-const APP_VERSION = "1.1.0";
+const APP_VERSION = "1.1.1";
 const APP_VERSION_KEY = "pixora-app-version";
 
 type Mode = "single" | "batch" | "reference";
@@ -16,7 +16,7 @@ type HistoryItem = { url: string; prompt: string; createdAt: string };
 type BatchStatus = "ready" | "uploading" | "queued" | "processing" | "done" | "failed";
 type BatchItem = {
   id: string;
-  file: File;
+  file?: File;
   preview: string;
   uploadedUrl?: string;
   taskId?: string;
@@ -322,6 +322,7 @@ export default function Editor() {
   function startBatchUpload(item: BatchItem) {
     const current = batchItemsRef.current.find((entry) => entry.id === item.id) || item;
     if (current.uploadedUrl) return Promise.resolve(current.uploadedUrl);
+    if (!current.file) return Promise.reject(new Error("The original image is no longer available. Remove it and add it again."));
     const existing = batchUploadPromisesRef.current.get(item.id);
     if (existing) return existing;
 
@@ -330,7 +331,7 @@ export default function Editor() {
       batchUploadQueueRef.current.push(() => {
         activeBatchUploadsRef.current += 1;
         updateBatchItem(item.id, { label: "Uploading…", status: "uploading" });
-        void uploadImage(item.file, (percentage) => {
+        void uploadImage(current.file!, (percentage) => {
           const now = Date.now();
           const rounded = Math.round(percentage);
           const previous = batchUploadProgressRef.current.get(item.id);
@@ -366,6 +367,12 @@ export default function Editor() {
     while (activeBatchUploadsRef.current < 1 && batchUploadQueueRef.current.length) {
       batchUploadQueueRef.current.shift()?.();
     }
+  }
+
+  function releaseBatchLocalSource(id: string, uploadedUrl: string) {
+    const current = batchItemsRef.current.find((item) => item.id === id);
+    if (current?.preview?.startsWith("blob:")) URL.revokeObjectURL(current.preview);
+    updateBatchItem(id, { file: undefined, preview: uploadedUrl });
   }
 
   async function pollTask(taskId: string, onStatus: (status: string) => void) {
@@ -436,71 +443,101 @@ export default function Editor() {
   async function generateBatch() {
     if (!batchItems.length || !batchPrompt.trim()) { setBatchMessage("Add at least one image and enter a shared prompt."); return; }
     if (batchItems.length > MAX_BATCH) { setBatchMessage(`Maximum ${MAX_BATCH} images per batch.`); return; }
-    setBatchBusy(true); setBatchMessage(""); setOutputTab("result");
-    const items = batchItemsRef.current;
+
+    setBatchBusy(true);
+    setBatchMessage("");
+    setOutputTab("result");
+
+    // Keep only lightweight IDs in this function. Holding a snapshot of every BatchItem
+    // would also hold all 50 File objects until the whole batch finishes.
+    const itemIds = batchItemsRef.current.map((item) => item.id);
+    const prompt = applyPreservation(batchPrompt, preserveFace, preservePose);
+
     setBatchItems((current) => {
       const next = current.map((item) => ({
         ...item,
         taskId: undefined,
         result: undefined,
         error: undefined,
-        progress: item.uploadedUrl ? 48 : Math.min(47, Math.max(1, item.progress)),
-        label: item.uploadedUrl ? "Uploaded · preparing generation" : "Starting upload…",
-        status: item.uploadedUrl ? "queued" as BatchStatus : "uploading" as BatchStatus,
+        progress: item.uploadedUrl ? 48 : 0,
+        label: item.uploadedUrl ? "Uploaded · waiting to generate" : "Waiting in queue",
+        status: item.uploadedUrl ? "queued" as BatchStatus : "ready" as BatchStatus,
       }));
       batchItemsRef.current = next;
       return next;
     });
+
     try {
-      const uploadResults = await mapLimit(items, 4, async (item) => {
+      // Stream the batch end-to-end one image at a time:
+      // upload -> create V-Editor task -> poll -> show result -> release local source -> next.
+      // The first result therefore does not wait for the other 49 uploads.
+      for (let index = 0; index < itemIds.length; index++) {
+        const id = itemIds[index];
+        const item = batchItemsRef.current.find((entry) => entry.id === id);
+        if (!item) continue;
+
         try {
+          updateBatchItem(id, {
+            progress: item.uploadedUrl ? 48 : Math.max(1, item.progress),
+            label: item.uploadedUrl ? "Uploaded · creating task" : `Uploading image ${index + 1} of ${itemIds.length}…`,
+            status: item.uploadedUrl ? "queued" : "uploading",
+            error: undefined,
+          });
+
           const uploadedUrl = item.uploadedUrl || await startBatchUpload(item);
-          updateBatchItem(item.id, { uploadedUrl, progress: 48, label: "Uploaded · creating individual task", status: "queued" });
-          return { id: item.id, uploadedUrl };
-        } catch (error) {
-          const detail = error instanceof Error ? error.message : "Upload failed";
-          updateBatchItem(item.id, { progress: 100, label: detail, status: "failed", error: detail });
-          return { id: item.id, error: detail };
-        }
-      });
 
-      const successfulUploads = uploadResults.filter((item): item is { id: string; uploadedUrl: string } => "uploadedUrl" in item);
-      if (!successfulUploads.length) throw new Error("All uploads failed.");
-      const prompt = applyPreservation(batchPrompt, preserveFace, preservePose);
-      const create = await fetch("/api/generate-batch", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ imageUrls: successfulUploads.map((item) => item.uploadedUrl), prompt, aspectRatio: batchRatio }) });
-      const created = await create.json() as { tasks?: Array<{ index: number; taskId?: string; error?: string }>; error?: string };
-      if (!create.ok && !created.tasks) throw new Error(created.error || "Could not start batch generation");
-      const tasks = created.tasks || [];
+          // Once Vercel/ImageKit has the source, do not keep the original File/blob URL alive.
+          // This is the key memory release for large 50-image selections.
+          releaseBatchLocalSource(id, uploadedUrl);
+          updateBatchItem(id, { uploadedUrl, progress: 50, label: "Creating V-Editor task…", status: "queued" });
 
-      await mapLimit(tasks, 8, async (task) => {
-        const source = successfulUploads[task.index];
-        if (!source) return;
-        if (!task.taskId) {
-          const detail = task.error || "Could not start this image.";
-          updateBatchItem(source.id, { progress: 100, label: detail, status: "failed", error: detail });
-          return;
-        }
-        updateBatchItem(source.id, { taskId: task.taskId, progress: 60, label: "Task accepted", status: "queued" });
-        try {
-          const output = await pollTask(task.taskId, (status) => updateBatchItem(source.id, { progress: taskPercent(status), label: status.replace(/_/g, " "), status: "processing" }));
-          updateBatchItem(source.id, { result: output, progress: 100, label: "Completed", status: "done" });
+          // Submit only this image. Never build a 50-URL request or wait for all uploads first.
+          const create = await fetch("/api/generate-batch", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ imageUrls: [uploadedUrl], prompt, aspectRatio: batchRatio }),
+          });
+          const created = await create.json() as { tasks?: Array<{ index: number; taskId?: string; error?: string }>; error?: string };
+          const task = created.tasks?.[0];
+
+          if (!create.ok && !task?.taskId) throw new Error(created.error || task?.error || "Could not start generation");
+          if (!task?.taskId) throw new Error(task?.error || created.error || "Could not start this image.");
+
+          updateBatchItem(id, { taskId: task.taskId, progress: 60, label: "Task accepted", status: "queued" });
+
+          const output = await pollTask(task.taskId, (status) => updateBatchItem(id, {
+            progress: taskPercent(status),
+            label: status.replace(/_/g, " "),
+            status: "processing",
+          }));
+
+          // Replace the source thumbnail with the finished image immediately.
+          updateBatchItem(id, {
+            result: output,
+            preview: output,
+            progress: 100,
+            label: "Completed",
+            status: "done",
+          });
           addHistory(output, batchPrompt.trim(), false);
         } catch (error) {
           const detail = error instanceof Error ? error.message : "Generation failed";
-          updateBatchItem(source.id, { progress: 100, label: detail, status: "failed", error: detail });
+          updateBatchItem(id, { progress: 100, label: detail, status: "failed", error: detail });
         }
-      });
+      }
 
       try {
         const statsResponse = await fetch("/api/stats", { cache: "no-store" });
         const stats = await statsResponse.json() as { totalGenerated?: number };
         if (statsResponse.ok && typeof stats.totalGenerated === "number") setTotalGenerated(stats.totalGenerated);
       } catch {
-        // The batch results are already complete; a stats refresh failure should not fail the batch.
+        // Results are already complete; a stats refresh failure should not fail the batch.
       }
     } catch (error) {
       setBatchMessage(error instanceof Error ? error.message : "Batch generation failed");
-    } finally { setBatchBusy(false); }
+    } finally {
+      setBatchBusy(false);
+    }
   }
 
   function downloadProxyUrl(url: string, index = 1, disposition: "attachment" | "inline" = "attachment") {
@@ -713,7 +750,7 @@ export default function Editor() {
           <div className="batchPane">
             <div className="batchToolbar"><strong>Selected images</strong><div>{batchItems.length > 0 && <button type="button" onClick={clearBatch} disabled={isProcessing}>Clear all</button>}<button type="button" onClick={() => batchInputRef.current?.click()} disabled={isProcessing || batchItems.length >= MAX_BATCH}>+ Add images</button></div></div>
             <input ref={batchInputRef} disabled={isProcessing} type="file" multiple accept="image/png,image/jpeg,image/webp" hidden onChange={(e: ChangeEvent<HTMLInputElement>) => { if (e.target.files) addBatchFiles(e.target.files); e.target.value = ""; }} />
-            {batchItems.length === 0 ? <div className="dropzone batchDropzone" onClick={() => batchInputRef.current?.click()} onDrop={batchDrop} onDragOver={(e) => e.preventDefault()} role="button" tabIndex={0}><UploadEmpty title={`Drop up to ${MAX_BATCH} images`} subtitle="One shared prompt will be applied to every image" button="Choose images" /></div> : <div className="batchGrid" onDrop={batchDrop} onDragOver={(e) => e.preventDefault()}>{batchItems.map((item, index) => <article key={item.id} className={`batchCard ${item.status}`}><div className="batchThumb"><img src={item.preview} alt={`Batch source ${index + 1}`} loading="lazy" decoding="async" />{!batchBusy && <button type="button" onClick={() => removeBatchItem(item.id)} aria-label={`Remove image ${index + 1}`}>×</button>}</div><div className="batchCardMeta"><span>{index + 1}</span><div><strong>{item.status === "done" ? "Done" : item.status === "failed" ? "Failed" : item.label}</strong><div className="miniProgress"><i style={{ width: `${item.progress}%` }} /></div></div><b>{Math.round(item.progress)}%</b></div>{item.result && <div className="batchResultActions"><button type="button" onClick={() => downloadOne(item.result!, index + 1)}>↓ Download</button><a href={item.result} target="_blank" rel="noopener noreferrer">Open ↗</a></div>}</article>)}</div>}
+            {batchItems.length === 0 ? <div className="dropzone batchDropzone" onClick={() => batchInputRef.current?.click()} onDrop={batchDrop} onDragOver={(e) => e.preventDefault()} role="button" tabIndex={0}><UploadEmpty title={`Drop up to ${MAX_BATCH} images`} subtitle="One shared prompt will be applied to every image" button="Choose images" /></div> : <div className="batchGrid" onDrop={batchDrop} onDragOver={(e) => e.preventDefault()}>{batchItems.map((item, index) => <article key={item.id} className={`batchCard ${item.status}`}><div className="batchThumb"><img src={item.result || item.preview} alt={item.result ? `Generated result ${index + 1}` : `Batch source ${index + 1}`} loading="lazy" decoding="async" />{!batchBusy && <button type="button" onClick={() => removeBatchItem(item.id)} aria-label={`Remove image ${index + 1}`}>×</button>}</div><div className="batchCardMeta"><span>{index + 1}</span><div><strong>{item.status === "done" ? "Done" : item.status === "failed" ? "Failed" : item.label}</strong><div className="miniProgress"><i style={{ width: `${item.progress}%` }} /></div></div><b>{Math.round(item.progress)}%</b></div>{item.result && <div className="batchResultActions"><button type="button" onClick={() => downloadOne(item.result!, index + 1)}>↓ Download</button><a href={item.result} target="_blank" rel="noopener noreferrer">Open ↗</a></div>}</article>)}</div>}
           </div>
           <div className="controls"><div className="controlHeading"><span className="step">02</span><h2>Shared batch prompt</h2></div><label className="promptLabel" htmlFor="batch-prompt">PROMPT FOR ALL IMAGES</label><textarea id="batch-prompt" value={batchPrompt} onChange={(e) => setBatchPrompt(e.target.value)} placeholder="Apply the same edit to every selected image…" maxLength={700} /><div className="promptMeta"><button type="button" onClick={() => setBatchPrompt("Give every image a clean cinematic color grade while preserving the subject and composition.")}>✦ Try an example</button><span>{batchPrompt.length}/700</span></div><RatioPicker value={batchRatio} onChange={setBatchRatio} /><PreserveControls preserveFace={preserveFace} preservePose={preservePose} onFace={setPreserveFace} onPose={setPreservePose} /><ProgressBar progress={batchProgress} /><button type="button" className="generate" disabled={!batchItems.length || !batchPrompt.trim() || batchBusy} onClick={generateBatch}>{batchBusy ? <><span className="spinner" /> Processing {batchDone}/{batchItems.length}</> : <>Generate {batchItems.length || ""} image{batchItems.length === 1 ? "" : "s"} <span>→</span></>}</button>{batchMessage && <p className="error">{batchMessage}</p>}<p className="fineprint">Each image is sent to V-Editor as its own independent request.</p></div>
         </div>
