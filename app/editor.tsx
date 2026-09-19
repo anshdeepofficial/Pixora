@@ -955,18 +955,20 @@ export default function Editor() {
     const filename = `Pixora-${uniqueDownloadNumber()}`;
     try {
       const source = originalDownloadUrl(url, filename, "attachment");
-      const [size] = await probeDownloadSizes([source]);
       setDownloadProgress({
         percent: 1,
-        label: size > 0
-          ? `Sending ${formatBytes(size)} original to browser download manager…`
-          : "Sending original to browser download manager…",
+        label: "Sending original to browser download manager…",
         state: "working",
       });
+
+      // Start the native browser download while this function still has the
+      // user's click activation. Pixora never buffers the original in memory.
       triggerNativeDownload(url, filename);
       setDownloadedUrls((current) => current.includes(url) ? current : [...current, url]);
       setDownloadNoticeUrl(previewForUrl(url));
       window.setTimeout(() => setDownloadNoticeUrl(""), 1600);
+
+      const [size] = await probeDownloadSizes([source]);
       setDownloadProgress({
         percent: 100,
         label: size > 0 ? `Browser download started · ${formatBytes(size)}` : "Browser download started",
