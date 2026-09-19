@@ -924,11 +924,12 @@ export default function Editor() {
     disposition: "attachment" | "inline" = "attachment",
   ) {
     try {
-      const parsed = new URL(url, window.location.origin);
-      if (parsed.origin === window.location.origin && parsed.pathname === "/api/result") {
+      // Keep task-aware Pixora result links same-origin and SSR-safe.
+      const parsed = new URL(url, "https://pixora.local");
+      if (parsed.pathname === "/api/result") {
         if (filename) parsed.searchParams.set("filename", filename);
         parsed.searchParams.set("disposition", disposition);
-        return parsed.toString();
+        return `${parsed.pathname}?${parsed.searchParams.toString()}`;
       }
     } catch {}
 
