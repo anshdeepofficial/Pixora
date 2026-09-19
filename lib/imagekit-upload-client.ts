@@ -56,14 +56,14 @@ function uploadWithProgress(formData: FormData, onProgress?: (event: UploadProgr
       if (request.readyState !== XMLHttpRequest.DONE) request.abort();
     };
 
+    request.open("POST", "https://upload.imagekit.io/api/v1/files/upload", true);
+    request.setRequestHeader("Accept", "application/json");
+
     if (signal?.aborted) {
       finishReject(new Error("Upload stopped."));
       return;
     }
     signal?.addEventListener("abort", abortUpload, { once: true });
-
-    request.open("POST", "https://upload.imagekit.io/api/v1/files/upload", true);
-    request.setRequestHeader("Accept", "application/json");
     request.upload.onprogress = (event) => {
       if (!event.lengthComputable || event.total <= 0) return;
       onProgress?.({ percentage: Math.min(100, (event.loaded / event.total) * 100) });
