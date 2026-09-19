@@ -186,6 +186,7 @@ export default function Editor() {
   const [authPassword, setAuthPassword] = useState("");
   const [authBusy, setAuthBusy] = useState(false);
   const [authMessage, setAuthMessage] = useState("");
+  const historyDeletePromisesRef = useRef(new Map<string, Promise<unknown>>());
   const swipeStart = useRef<number | null>(null);
   const undoSwipeStart = useRef<number | null>(null);
   const undoTimerRef = useRef<number | null>(null);
@@ -1009,7 +1010,12 @@ export default function Editor() {
       return next;
     });
     localStorage.setItem("pixora-history-hidden", JSON.stringify(Array.from(new Set([...readHiddenHistory(), item.url]))));
-    if (accountEmail) void fetch(`/api/account-history?url=${encodeURIComponent(item.url)}`, { method: "DELETE" });
+    if (accountEmail) {
+      const deletion = fetch(`/api/account-history?url=${encodeURIComponent(item.url)}`, { method: "DELETE" })
+        .catch(() => undefined)
+        .finally(() => historyDeletePromisesRef.current.delete(item.url));
+      historyDeletePromisesRef.current.set(item.url, deletion);
+    }
     setSelected((current) => current.filter((url) => url !== item.url));
     setPendingUndo({ item, index });
     undoTimerRef.current = window.setTimeout(() => {
@@ -1018,11 +1024,15 @@ export default function Editor() {
     }, 5000);
   }
 
-  function undoHistoryRemoval() {
+  async function undoHistoryRemoval() {
     if (!pendingUndo) return;
     const { item, index } = pendingUndo;
     localStorage.setItem("pixora-history-hidden", JSON.stringify(readHiddenHistory().filter((url) => url !== item.url)));
-    if (accountEmail) void saveSyncedHistoryItem(item);
+
+    const pendingDelete = historyDeletePromisesRef.current.get(item.url);
+    if (pendingDelete) await pendingDelete;
+    if (accountEmail) await saveSyncedHistoryItem(item).catch(() => false);
+
     setHistory((current) => {
       const withoutItem = current.filter((entry) => entry.url !== item.url);
       const next = [...withoutItem];
@@ -1180,7 +1190,7 @@ export default function Editor() {
       const distance = event.changedTouches[0].clientX - undoSwipeStart.current;
       if (Math.abs(distance) > 40) dismissUndo();
       undoSwipeStart.current = null;
-    }}><span>Image removed</span><button type="button" className="undoAction" onClick={undoHistoryRemoval}>Undo</button><button type="button" className="undoClose" onClick={dismissUndo} aria-label="Dismiss undo message">×</button></div>}
+    }}><span>Image removed</span><button type="button" className="undoAction" onClick={() => void undoHistoryRemoval()}>Undo</button><button type="button" className="undoClose" onClick={dismissUndo} aria-label="Dismiss undo message">×</button></div>}
 
     <section className="how" id="how"><p className="eyebrow">THREE WAYS TO CREATE</p><h2>One editor.<br />Three flexible workflows.</h2><div className="howGrid"><article><span>01</span><h3>Single</h3><p>Edit one image with a direct natural-language instruction.</p></article><article><span>02</span><h3>Batch</h3><p>Apply one shared prompt to as many as {MAX_BATCH} images in one run. Every image is processed independently.</p></article><article><span>03</span><h3>Reference</h3><p>Guide a main image with a second visual reference plus your prompt.</p></article></div></section>
     <footer><a className="brand" href="#top"><span className="brandMark">P</span><span>Pixora</span><small className="versionBadge">v{APP_VERSION}</small></a><p>AI editing, without the complexity.</p><span>Powered by VModel V-Editor</span></footer>
