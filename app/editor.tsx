@@ -660,7 +660,8 @@ export default function Editor() {
         body: JSON.stringify({ count: itemIds.length }),
       });
       const plan = await planResponse.json() as { leases?: string[]; error?: string };
-      if (!planResponse.ok || !Array.isArray(plan.leases) || plan.leases.length !== itemIds.length) {
+      const leases = Array.isArray(plan.leases) ? plan.leases : [];
+      if (!planResponse.ok || leases.length !== itemIds.length) {
         throw new Error(plan.error || "Could not prepare enough V-Editor slots for this batch.");
       }
       setBatchMessage("");
@@ -692,7 +693,7 @@ export default function Editor() {
 
           updateBatchItem(id, { uploadedUrl, progress: 52, label: "Creating V-Editor task…", status: "queued" });
 
-          const lease = plan.leases[index];
+          const lease = leases[index];
           if (!lease) throw new Error("Missing generation allocation for this image.");
 
           const create = await fetch("/api/generate-item", {
