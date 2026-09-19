@@ -18,9 +18,11 @@ export async function createVModelTask(token: string, input: CreateTaskInput) {
         ...(input.referenceImageUrl ? { ref_image: input.referenceImageUrl } : {}),
         prompt: input.prompt.trim(),
         aspect_ratio: input.aspectRatio || "default",
-        megapixels: 1,
+        // Highest quality supported by V-Editor: 4 MP generation and 4K result.
+        // Keep PNG so Pixora does not introduce lossy JPEG compression.
+        megapixels: 4,
         steps: 4,
-        result_resolution: 0,
+        result_resolution: 2,
         file_format: "png",
         disable_safety_checker: false,
       },
