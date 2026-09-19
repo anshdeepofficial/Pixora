@@ -353,6 +353,11 @@ export default function JobRecoveryClient() {
     const onGenerateIntent = (event) => {
       const button = event.target?.closest?.("button.generate");
       if (!button || button.disabled) return;
+
+      // Batch mode now owns a bounded streaming queue in Editor. Treating every
+      // per-image queue request as a whole recoverable batch would overwrite task state.
+      if (button.closest(".batchWorkspace")) return;
+
       const batchControls = button.closest(".batchWorkspace")?.querySelector(".controls");
       const singleControls = button.closest(".workspace")?.querySelector(".controls");
       const workspace = button.closest(".workspace");
@@ -419,6 +424,13 @@ export default function JobRecoveryClient() {
     const patchedFetch = async (input, init) => {
       const url = new URL(requestUrl(input), window.location.href);
       const method = requestMethod(input, init);
+      const headers = new Headers(init?.headers || {});
+      const queueItemRequest = headers.get("X-Pixora-Queue-Item") === "1";
+
+      // Streaming batch items are managed by Editor's bounded queue, not by the
+      // single-job recovery bridge. This prevents parallel item requests from
+      // replacing each other's recovery metadata.
+      if (queueItemRequest) return originalFetch(input, init);
 
       if (url.origin === window.location.origin && method === "POST" && (url.pathname === "/api/generate" || url.pathname === "/api/generate-batch")) {
         const body = bodyJson(init);
