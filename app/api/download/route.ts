@@ -30,21 +30,56 @@ function safeFilename(value: string | null, extension: string) {
   return /\.[a-zA-Z0-9]{2,5}$/.test(cleaned) ? cleaned : `${cleaned}.${extension}`;
 }
 
-export async function GET(request: Request) {
+async function resolveAllowedImage(request: Request) {
   const requestUrl = new URL(request.url);
   const value = requestUrl.searchParams.get("url");
-  if (!value) return Response.json({ error: "Image URL is required." }, { status: 400 });
+  if (!value) return { error: Response.json({ error: "Image URL is required." }, { status: 400 }) };
 
   let imageUrl: URL;
   try {
     imageUrl = new URL(value);
   } catch {
-    return Response.json({ error: "Invalid image URL." }, { status: 400 });
+    return { error: Response.json({ error: "Invalid image URL." }, { status: 400 }) };
   }
 
   if (!isAllowedImageUrl(imageUrl)) {
-    return Response.json({ error: `This image host is not allowed: ${imageUrl.hostname}` }, { status: 403 });
+    return { error: Response.json({ error: `This image host is not allowed: ${imageUrl.hostname}` }, { status: 403 }) };
   }
+  return { requestUrl, imageUrl };
+}
+
+export async function HEAD(request: Request) {
+  const resolved = await resolveAllowedImage(request);
+  if (resolved.error) return resolved.error;
+
+  try {
+    const upstream = await fetch(resolved.imageUrl!, {
+      method: "HEAD",
+      cache: "no-store",
+      redirect: "follow",
+      headers: { Accept: "image/avif,image/webp,image/png,image/jpeg,image/*,*/*;q=0.8" },
+    });
+    if (!upstream.ok) return new Response(null, { status: 502 });
+
+    const headers = new Headers({
+      "Cache-Control": "private, no-store, max-age=0",
+      "X-Content-Type-Options": "nosniff",
+    });
+    const type = upstream.headers.get("content-type");
+    const length = upstream.headers.get("content-length");
+    if (type) headers.set("Content-Type", type);
+    if (length) headers.set("Content-Length", length);
+    return new Response(null, { status: 200, headers });
+  } catch {
+    return new Response(null, { status: 502 });
+  }
+}
+
+export async function GET(request: Request) {
+  const resolved = await resolveAllowedImage(request);
+  if (resolved.error) return resolved.error;
+  const requestUrl = resolved.requestUrl!;
+  const imageUrl = resolved.imageUrl!;
 
   try {
     const upstream = await fetch(imageUrl, {
