@@ -983,6 +983,42 @@ export default function Editor() {
     if (!urls.length) return;
     const batchId = uniqueDownloadNumber();
     const sourceUrls = urls.map((url) => originalDownloadUrl(url, "", "inline"));
+
+    if (kind === "zip") {
+      if (!supportsStreamingZip()) {
+        throw new Error("Large ZIP streaming needs Chrome or Edge desktop. Use Separate files in this browser.");
+      }
+
+      const sources = sourceUrls.map((url, index) => ({
+        url,
+        filename: `Pixora-${batchId}-${String(index + 1).padStart(3, "0")}.png`,
+      }));
+
+      setDownloadProgress({
+        percent: 1,
+        label: "Choose where to save the ZIP…",
+        state: "working",
+      });
+
+      // The native picker must run before any network await so the browser
+      // still recognizes the user's click as active permission.
+      await streamZipToDisk(sources, `Pixora-${batchId}.zip`, (progress) => {
+        const remaining = Math.max(0, progress.totalBytes - progress.loadedBytes);
+        const sizeText = progress.totalBytes > 0
+          ? `${formatBytes(progress.loadedBytes)} / ${formatBytes(progress.totalBytes)} · ${formatBytes(remaining)} remaining`
+          : `${formatBytes(progress.loadedBytes)} written`;
+        setDownloadProgress({
+          percent: progress.percent,
+          label: `ZIP streaming to disk · ${sizeText} · ${progress.filesDone}/${progress.totalFiles} images`,
+          state: "working",
+        });
+      });
+
+      setDownloadedUrls((current) => Array.from(new Set([...current, ...urls])));
+      setDownloadProgress({ percent: 100, label: "ZIP saved to disk", state: "done" });
+      return;
+    }
+
     const sizes = await probeDownloadSizes(sourceUrls);
     const totalBytes = sizes.reduce((sum, size) => sum + size, 0);
 
@@ -1012,41 +1048,7 @@ export default function Editor() {
       return;
     }
 
-    if (!supportsStreamingZip()) {
-      throw new Error("Large ZIP streaming needs Chrome or Edge desktop. Use Separate files in this browser.");
-    }
 
-    const sources = sourceUrls.map((url, index) => ({
-      url,
-      filename: `Pixora-${batchId}-${String(index + 1).padStart(3, "0")}.png`,
-    }));
-
-    setDownloadProgress({
-      percent: 1,
-      label: totalBytes > 0
-        ? `ZIP source size ${formatBytes(totalBytes)} · choose where to save…`
-        : "Choose where to save the ZIP…",
-      state: "working",
-    });
-
-    await streamZipToDisk(sources, `Pixora-${batchId}.zip`, (progress) => {
-      const remaining = Math.max(0, progress.totalBytes - progress.loadedBytes);
-      const sizeText = progress.totalBytes > 0
-        ? `${formatBytes(progress.loadedBytes)} / ${formatBytes(progress.totalBytes)} · ${formatBytes(remaining)} remaining`
-        : `${formatBytes(progress.loadedBytes)} written`;
-      setDownloadProgress({
-        percent: progress.percent,
-        label: `ZIP streaming to disk · ${sizeText} · ${progress.filesDone}/${progress.totalFiles} images`,
-        state: "working",
-      });
-    });
-
-    setDownloadedUrls((current) => Array.from(new Set([...current, ...urls])));
-    setDownloadProgress({
-      percent: 100,
-      label: totalBytes > 0 ? `ZIP saved · ${formatBytes(totalBytes)} source data` : "ZIP saved",
-      state: "done",
-    });
   }
 
   async function downloadSelected(kind: "zip" | "separate") {
@@ -1242,7 +1244,7 @@ export default function Editor() {
           {batchResults.length ? <>
             <div className="batchOutputHead"><div><strong>{batchResults.length} result{batchResults.length === 1 ? "" : "s"} ready</strong><small>{batchBusy ? `${batchDone}/${batchItems.length} completed · queue active` : batchStopped ? `${batchStopped} stopped` : batchFailed ? `${batchFailed} failed` : "Batch completed"}</small></div><div><button type="button" disabled={batchDownloading} onClick={() => void downloadBatch("zip")}>{batchDownloading ? "Preparing…" : "↓ Download ZIP"}</button><button type="button" disabled={batchDownloading} onClick={() => void downloadBatch("separate")}>Separate files</button></div></div>
             <div className="batchOutputGrid">{batchItems.filter((item) => item.result).map((item, index) => <article key={item.id}>
-              <div className={`downloadVisual ${downloadedUrls.includes(item.result!) ? "downloaded" : ""}`} onClick={() => openViewer(batchResults, index, batchPreviewResults)} role="button" tabIndex={0}><img src={displayImageUrl(item.resultPreview || item.result!, 900, 88)} alt={`Batch result ${index + 1}`} loading="lazy" decoding="async" /><span className="downloadCheck">✓<small>Downloaded</small></span></div>
+              <div className={`downloadVisual ${downloadedUrls.includes(item.result!) ? "downloaded" : ""}`} onClick={() => openViewer(batchResults, index, batchPreviewResults)} role="button" tabIndex={0}><img src={displayImageUrl(item.resultPreview || item.result!, 900, 88)} alt={`Batch result ${index + 1}`} loading="lazy" decoding="async" /><span className="downloadCheck">✓<small>Download started</small></span></div>
               <div><button type="button" onClick={() => void downloadOne(item.result!, index + 1)}>↓ Download</button><a href={originalDownloadUrl(item.result!, "", "inline")} target="_blank" rel="noopener noreferrer">Open full size ↗</a></div>
             </article>)}</div>
           </> : <div className="emptyResult"><span>✦</span><h3>Your batch results will appear here</h3><p>Add up to {MAX_BATCH} images, use one prompt, and generate them together.</p></div>}
@@ -1255,14 +1257,14 @@ export default function Editor() {
                 index >= 0 ? index : 0,
                 index >= 0 ? history.map((item) => item.previewUrl || item.url) : [activeResultPreview || activeResult],
               );
-            }} role="button" tabIndex={0}><img src={displayImageUrl(activeResultPreview || activeResult, 1200, 90)} alt="AI generated edit" decoding="async" /><span className="downloadCheck">✓<small>Downloaded</small></span></div>
+            }} role="button" tabIndex={0}><img src={displayImageUrl(activeResultPreview || activeResult, 1200, 90)} alt="AI generated edit" decoding="async" /><span className="downloadCheck">✓<small>Download started</small></span></div>
             <div className="resultActions"><button type="button" onClick={() => void downloadOne(activeResult)}>↓ Download</button><a href={originalDownloadUrl(activeResult, "", "inline")} target="_blank" rel="noopener noreferrer">Open full size ↗</a></div>
           </div> : <div className="emptyResult"><span>✦</span><h3>Your creation will appear here</h3><p>{mode === "reference" ? "Add a main image, reference image, and prompt." : "Upload an image, write a prompt, and let Pixora do the rest."}</p></div>}
         </div> : <div className={`historyGrid ${selecting ? "selecting" : ""}`}>
           {history.length ? history.map((item, index) => <article key={item.createdAt} className={selected.includes(item.url) ? "selected" : ""} onClick={() => selecting ? toggleSelection(item.url) : openViewer(history.map((entry) => entry.url), index, history.map((entry) => entry.previewUrl || entry.url))} role="button" tabIndex={0} onKeyDown={(event) => event.key === "Enter" && (selecting ? toggleSelection(item.url) : openViewer(history.map((entry) => entry.url), index, history.map((entry) => entry.previewUrl || entry.url)))}>
             {selecting && <span className="check">{selected.includes(item.url) ? "✓" : ""}</span>}
             {!selecting && <button type="button" className="historyDelete" disabled={isProcessing} aria-label="Remove image from history" onClick={(event) => { event.stopPropagation(); removeHistoryItem(item, index); }}>×</button>}
-            <div className={`downloadVisual ${downloadedUrls.includes(item.url) ? "downloaded" : ""}`}><img src={displayImageUrl(item.previewUrl || item.url, 720, 86)} alt={item.prompt} loading="lazy" decoding="async" /><span className="downloadCheck">✓<small>Downloaded</small></span></div>
+            <div className={`downloadVisual ${downloadedUrls.includes(item.url) ? "downloaded" : ""}`}><img src={displayImageUrl(item.previewUrl || item.url, 720, 86)} alt={item.prompt} loading="lazy" decoding="async" /><span className="downloadCheck">✓<small>Download started</small></span></div>
             <div className="historyCaption"><span>{item.prompt}</span>{!selecting && <button type="button" aria-label="Download image" onClick={(event) => { event.stopPropagation(); void downloadOne(item.url, index + 1); }}>↓</button>}</div>
           </article>) : <div className="emptyResult"><h3>No edits yet</h3><p>Edits are kept for 1 hour. Sign in to sync them across devices.</p></div>}
         </div>}
@@ -1300,7 +1302,7 @@ export default function Editor() {
       {viewerUrls.length > 1 && <button type="button" className="viewerNext" onClick={(event) => { event.stopPropagation(); moveViewer(1); }} aria-label="Next image">›</button>}
     </div>}
 
-    {downloadNoticeUrl && <div className="downloadNotice" role="status"><img src={displayImageUrl(downloadNoticeUrl, 160)} alt="" /><div><b>✓</b><span>Downloaded</span></div></div>}
+    {downloadNoticeUrl && <div className="downloadNotice" role="status"><img src={displayImageUrl(downloadNoticeUrl, 160)} alt="" /><div><b>✓</b><span>Download started</span></div></div>}
 
     {pendingUndo && <div className="undoToast" role="status" aria-live="polite" onTouchStart={(event) => { undoSwipeStart.current = event.touches[0].clientX; }} onTouchEnd={(event) => {
       if (undoSwipeStart.current === null) return;
