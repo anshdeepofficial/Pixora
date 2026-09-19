@@ -5,17 +5,8 @@ import {
   unpackVModelTaskId,
   vModelTokenFingerprint,
 } from "../../../lib/vmodel-token";
-import { imageKitConfigured, uploadImageKitData, uploadImageKitRemoteFile } from "../../../lib/imagekit";
-
-function extensionFromUrl(value: string) {
-  try {
-    const pathname = new URL(value).pathname;
-    const match = pathname.match(/\.(png|jpe?g|webp|gif|avif)$/i);
-    return match ? match[1].toLowerCase().replace("jpeg", "jpg") : "png";
-  } catch {
-    return "png";
-  }
-}
+import { imageKitConfigured, uploadImageKitData } from "../../../lib/imagekit";
+import { createStoredResultPreview } from "../../../lib/result-preview";
 
 export async function GET(request: Request) {
   const packedId = new URL(request.url).searchParams.get("id") || "";
@@ -37,25 +28,23 @@ export async function GET(request: Request) {
   const data = await response.json() as { result?: { status?: string; output?: string[]; error?: string } };
   if (!response.ok || !data.result) return Response.json({ error: "Could not check generation." }, { status: 502 });
 
-  let output = data.result.output;
-  let outputFileId: string | undefined;
+  const output = data.result.output;
+  let previewUrl: string | undefined;
 
-  if (data.result.status === "succeeded" && data.result.output?.[0] && imageKitConfigured()) {
+  if (data.result.status === "succeeded" && data.result.output?.[0]) {
     const originalOutput = data.result.output[0];
 
-    try {
-      const extension = extensionFromUrl(originalOutput);
-      const persisted = await uploadImageKitRemoteFile(
-        originalOutput,
-        `${unpacked.taskId}.${extension}`,
-        `/pixora-results/${fingerprint}`,
-        ["pixora-result", `vmodel-${fingerprint}`],
-      );
-      output = [persisted.url, ...data.result.output.slice(1)];
-      outputFileId = persisted.fileId;
-    } catch (error) {
-      console.error("Could not persist Pixora generation in ImageKit", error);
-      output = data.result.output;
+    if (imageKitConfigured()) {
+      try {
+        previewUrl = await createStoredResultPreview(
+          originalOutput,
+          unpacked.taskId,
+          fingerprint,
+          token,
+        ) || undefined;
+      } catch (error) {
+        console.error("Could not create lightweight Pixora preview", error);
+      }
     }
 
     // The VModel task ID is unique. Overwriting the same marker keeps the
@@ -76,7 +65,7 @@ export async function GET(request: Request) {
   return Response.json({
     status: data.result.status,
     output,
-    outputFileId,
+    previewUrl,
     error: data.result.error,
   }, { headers: { "Cache-Control": "no-store" } });
 }
