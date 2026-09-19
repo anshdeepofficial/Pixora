@@ -239,7 +239,7 @@ export default function Editor() {
   const batchResults = batchItems.filter((item) => item.result).map((item) => item.result!);
   const batchProgress: ProgressState = batchItems.length && (batchBusy || batchOverall > 0) ? {
     percent: batchOverall,
-    state: batchBusy ? "working" : batchFailed === batchItems.length ? "error" : batchDone > 0 ? "done" : "idle",
+    state: batchBusy ? "working" : batchStopped > 0 ? "stopped" : batchFailed === batchItems.length ? "error" : batchDone > 0 ? "done" : "idle",
     label: batchBusy
       ? batchStopRequested
         ? `Stopping safely · ${batchDone} completed${batchFailed ? ` · ${batchFailed} failed` : ""}`
@@ -995,7 +995,7 @@ export default function Editor() {
 
         {outputTab === "result" ? mode === "batch" ? <div className="batchOutput">
           {batchResults.length ? <>
-            <div className="batchOutputHead"><div><strong>{batchResults.length} result{batchResults.length === 1 ? "" : "s"} ready</strong><small>{batchFailed ? `${batchFailed} failed` : "Batch completed"}</small></div><div><button type="button" disabled={batchDownloading} onClick={() => void downloadBatch("zip")}>{batchDownloading ? "Preparing…" : "↓ Download ZIP"}</button><button type="button" disabled={batchDownloading} onClick={() => void downloadBatch("separate")}>Separate files</button></div></div>
+            <div className="batchOutputHead"><div><strong>{batchResults.length} result{batchResults.length === 1 ? "" : "s"} ready</strong><small>{batchBusy ? `${batchDone}/${batchItems.length} completed · queue active` : batchStopped ? `${batchStopped} stopped` : batchFailed ? `${batchFailed} failed` : "Batch completed"}</small></div><div><button type="button" disabled={batchDownloading} onClick={() => void downloadBatch("zip")}>{batchDownloading ? "Preparing…" : "↓ Download ZIP"}</button><button type="button" disabled={batchDownloading} onClick={() => void downloadBatch("separate")}>Separate files</button></div></div>
             <div className="batchOutputGrid">{batchItems.filter((item) => item.result).map((item, index) => <article key={item.id}>
               <div className={`downloadVisual ${downloadedUrls.includes(item.result!) ? "downloaded" : ""}`} onClick={() => openViewer(batchResults, index)} role="button" tabIndex={0}><img src={displayImageUrl(item.result!, 640)} alt={`Batch result ${index + 1}`} loading="lazy" decoding="async" /><span className="downloadCheck">✓<small>Downloaded</small></span></div>
               <div><button type="button" onClick={() => void downloadOne(item.result!, index + 1)}>↓ Download</button><a href={item.result} target="_blank" rel="noopener noreferrer">Open full size ↗</a></div>
