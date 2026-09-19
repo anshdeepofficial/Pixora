@@ -639,9 +639,21 @@ export default function Editor() {
     });
 
     try {
-      // Bounded streaming queue: only a few images are active end-to-end at once.
-      // Uploads themselves remain one-at-a-time, while accepted V-Editor jobs can run
-      // in parallel so the model is never idle and 50-image batches do not become serial.
+      setBatchMessage("Preparing generation queue…");
+      const planResponse = await fetch("/api/batch-plan", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ count: itemIds.length }),
+      });
+      const plan = await planResponse.json() as { leases?: string[]; error?: string };
+      if (!planResponse.ok || !Array.isArray(plan.leases) || plan.leases.length !== itemIds.length) {
+        throw new Error(plan.error || "Could not prepare enough V-Editor slots for this batch.");
+      }
+      setBatchMessage("");
+
+      // Bounded streaming queue: token allocation is done once, uploads stay controlled,
+      // and only a few images are active end-to-end at once. Accepted V-Editor jobs can
+      // overlap, so the model is not idle while the browser still avoids a 50-image burst.
       await mapLimit(itemIds, BATCH_PIPELINE_CONCURRENCY, async (id, index) => {
         if (batchStopRequestedRef.current) return;
 
@@ -666,23 +678,21 @@ export default function Editor() {
 
           updateBatchItem(id, { uploadedUrl, progress: 52, label: "Creating V-Editor task…", status: "queued" });
 
-          const create = await fetch("/api/generate-batch", {
+          const lease = plan.leases[index];
+          if (!lease) throw new Error("Missing generation allocation for this image.");
+
+          const create = await fetch("/api/generate-item", {
             method: "POST",
-            headers: {
-              "Content-Type": "application/json",
-              "X-Pixora-Queue-Item": "1",
-            },
-            body: JSON.stringify({ imageUrls: [uploadedUrl], prompt, aspectRatio: batchRatio }),
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ imageUrl: uploadedUrl, prompt, aspectRatio: batchRatio, lease }),
           });
-          const created = await create.json() as { tasks?: Array<{ index: number; taskId?: string; error?: string }>; error?: string };
-          const task = created.tasks?.[0];
+          const created = await create.json() as { taskId?: string; error?: string };
 
-          if (!create.ok && !task?.taskId) throw new Error(created.error || task?.error || "Could not start generation");
-          if (!task?.taskId) throw new Error(task?.error || created.error || "Could not start this image.");
+          if (!create.ok || !created.taskId) throw new Error(created.error || "Could not start this image.");
 
-          updateBatchItem(id, { taskId: task.taskId, progress: 60, label: "V-Editor processing", status: "processing" });
+          updateBatchItem(id, { taskId: created.taskId, progress: 60, label: "V-Editor processing", status: "processing" });
 
-          const output = await pollTask(task.taskId, (status) => updateBatchItem(id, {
+          const output = await pollTask(created.taskId, (status) => updateBatchItem(id, {
             progress: taskPercent(status),
             label: status.replace(/_/g, " "),
             status: "processing",
