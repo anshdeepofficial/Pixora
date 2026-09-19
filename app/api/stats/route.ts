@@ -2,7 +2,6 @@ import { deleteExpiredImageKitFiles, imageKitConfigured } from "../../../lib/ima
 import { getVModelGenerationCount, getVModelTokenContext } from "../../../lib/vmodel-token";
 
 const ONE_HOUR = 60 * 60 * 1000;
-const ONE_DAY = 24 * ONE_HOUR;
 
 async function fetchVModelCreditsLeft(token: string) {
   try {
@@ -46,7 +45,7 @@ export async function GET() {
       countPromise,
       creditsLeftPromise,
       deleteExpiredImageKitFiles("/pixora-inputs/", ONE_HOUR),
-      deleteExpiredImageKitFiles("/pixora-results/", ONE_DAY),
+      deleteExpiredImageKitFiles("/pixora-results/", ONE_HOUR),
     ]);
 
     return Response.json(
