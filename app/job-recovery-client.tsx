@@ -36,12 +36,12 @@ function taskDone(task) {
   return task?.status === "done" || task?.status === "failed";
 }
 
-function mergeHistory(output, prompt) {
+function mergeHistory(output, prompt, previewUrl = "") {
   if (!output) return;
   try {
     const current = JSON.parse(localStorage.getItem("pixora-history") || "[]");
     if (current.some((item) => item?.url === output)) return;
-    const item = { url: output, prompt: prompt || "Recovered generation", createdAt: new Date().toISOString() };
+    const item = { url: output, previewUrl: previewUrl || undefined, prompt: prompt || "Recovered generation", createdAt: new Date().toISOString() };
     const cutoff = Date.now() - MAX_JOB_AGE;
     const next = [item, ...current].filter((entry) => new Date(entry?.createdAt || 0).getTime() > cutoff);
     localStorage.setItem("pixora-history", JSON.stringify(next));
@@ -260,9 +260,10 @@ export default function JobRecoveryClient() {
       target.error = data?.error || "Generation failed";
     } else if (data?.status === "succeeded" && data?.output?.[0]) {
       target.status = "done";
-      target.output = data.output[0];
+      target.output = data.downloadUrl || data.output[0];
+      target.previewUrl = data.previewUrl || data.output[0];
       target.error = undefined;
-      if (current.bootId !== currentBoot.current || current.managedByRecovery) mergeHistory(target.output, current.prompt);
+      if (current.bootId !== currentBoot.current || current.managedByRecovery) mergeHistory(target.output, current.prompt, target.previewUrl);
     } else {
       target.status = "processing";
     }
