@@ -247,6 +247,45 @@ export async function allocateVModelTokenContexts(requested = 1) {
   return allocations;
 }
 
+export async function allocateVModelTokenLeases(requested = 1) {
+  const contexts = await allocateVModelTokenContexts(requested);
+  const expiresAt = Date.now() + 20 * 60 * 1000;
+
+  return contexts.map((context) => {
+    const sealed = encryptText(JSON.stringify({
+      token: context.token,
+      fingerprint: context.fingerprint,
+      expiresAt,
+    }));
+    return Buffer.from(sealed, "utf8").toString("base64url");
+  });
+}
+
+export function unpackVModelTokenLease(lease: string) {
+  if (!lease || lease.length > 4096) throw new Error("Invalid batch allocation.");
+  let sealed = "";
+  try {
+    sealed = Buffer.from(lease, "base64url").toString("utf8");
+  } catch {
+    throw new Error("Invalid batch allocation.");
+  }
+
+  let payload: { token?: string; fingerprint?: string; expiresAt?: number };
+  try {
+    payload = JSON.parse(decryptText(JSON.parse(sealed))) as { token?: string; fingerprint?: string; expiresAt?: number };
+  } catch {
+    throw new Error("Invalid batch allocation.");
+  }
+
+  if (!payload.token || !payload.fingerprint || !payload.expiresAt || payload.expiresAt < Date.now()) {
+    throw new Error("Batch allocation expired. Start the batch again.");
+  }
+  if (vModelTokenFingerprint(payload.token) !== payload.fingerprint) {
+    throw new Error("Invalid batch allocation.");
+  }
+  return { token: payload.token, fingerprint: payload.fingerprint };
+}
+
 export async function getVModelTokenContext() {
   const [context] = await allocateVModelTokenContexts(1);
   return context || null;
