@@ -334,6 +334,16 @@ export default function JobRecoveryClient() {
 
   useEffect(() => {
     const existing = readJson(ACTIVE_JOB_KEY);
+
+    // v1.2+ batch processing is a bounded streaming queue owned by Editor.
+    // Old batch recovery snapshots describe the previous all-at-once flow and must
+    // not take over the new queue after a refresh.
+    if (existing?.kind === "batch") {
+      writeJob(null);
+      void clearRecoveryFiles(existing.id);
+      return;
+    }
+
     if (freshJob(existing)) {
       jobRef.current = existing;
       setJob(existing);
