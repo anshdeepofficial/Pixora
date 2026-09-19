@@ -5,8 +5,7 @@ import {
   unpackVModelTaskId,
   vModelTokenFingerprint,
 } from "../../../lib/vmodel-token";
-import { imageKitConfigured, uploadImageKitData } from "../../../lib/imagekit";
-import { createStoredResultPreview } from "../../../lib/result-preview";
+import { uploadImageKitData } from "../../../lib/imagekit";
 
 export async function GET(request: Request) {
   const packedId = new URL(request.url).searchParams.get("id") || "";
@@ -35,19 +34,7 @@ export async function GET(request: Request) {
   if (data.result.status === "succeeded" && data.result.output?.[0]) {
     const originalOutput = data.result.output[0];
     downloadUrl = new URL(`/api/result?id=${encodeURIComponent(packedId)}`, request.url).toString();
-
-    if (imageKitConfigured()) {
-      try {
-        previewUrl = await createStoredResultPreview(
-          originalOutput,
-          unpacked.taskId,
-          fingerprint,
-          token,
-        ) || undefined;
-      } catch (error) {
-        console.error("Could not create lightweight Pixora preview", error);
-      }
-    }
+    previewUrl = new URL(`/api/result-preview?id=${encodeURIComponent(packedId)}`, request.url).toString();
 
     // The VModel task ID is unique. Overwriting the same marker keeps the
     // permanent per-API generation counter idempotent across polling retries.
