@@ -2,20 +2,21 @@
 
 import { ChangeEvent, DragEvent, useEffect, useMemo, useRef, useState } from "react";
 import { upload } from "@vercel/blob/client";
+import { probeDownloadSizes, streamZipToDisk, supportsStreamingZip } from "../lib/stream-zip-client";
 
 const ratios = ["default", "1:1", "3:2", "2:3", "9:16", "16:9", "3:4", "4:3"];
 const MAX_BATCH = 50;
 const MAX_FILE_BYTES = 12 * 1024 * 1024;
 const BATCH_PIPELINE_CONCURRENCY = 4;
 const HISTORY_TTL_MS = 60 * 60 * 1000;
-const APP_VERSION = "1.3.0";
+const APP_VERSION = "1.4.0";
 const APP_VERSION_KEY = "pixora-app-version";
 
 type Mode = "single" | "batch" | "reference";
 type OutputTab = "result" | "history";
 type ProgressState = { percent: number; label: string; state: "idle" | "working" | "done" | "error" | "stopped" };
 type GenerationStage = "idle" | "uploading" | "submitting" | "processing";
-type HistoryItem = { url: string; prompt: string; createdAt: string };
+type HistoryItem = { url: string; previewUrl?: string; prompt: string; createdAt: string };
 type BatchStatus = "ready" | "uploading" | "queued" | "processing" | "done" | "failed" | "stopped";
 type BatchItem = {
   id: string;
@@ -24,6 +25,7 @@ type BatchItem = {
   uploadedUrl?: string;
   taskId?: string;
   result?: string;
+  resultPreview?: string;
   error?: string;
   progress: number;
   label: string;
@@ -137,6 +139,7 @@ export default function Editor() {
   const singleStageRef = useRef<GenerationStage>("idle");
   const singleUploadAbortRef = useRef<AbortController | null>(null);
   const [singleResult, setSingleResult] = useState("");
+  const [singleResultPreview, setSingleResultPreview] = useState("");
   const [singleMessage, setSingleMessage] = useState("");
   const [singleProgress, setSingleProgress] = useState<ProgressState>({ percent: 0, label: "", state: "idle" });
 
@@ -166,6 +169,7 @@ export default function Editor() {
   const referenceStageRef = useRef<GenerationStage>("idle");
   const referenceUploadAbortRef = useRef<AbortController | null>(null);
   const [referenceResult, setReferenceResult] = useState("");
+  const [referenceResultPreview, setReferenceResultPreview] = useState("");
   const [referenceMessage, setReferenceMessage] = useState("");
   const [referenceProgress, setReferenceProgress] = useState<ProgressState>({ percent: 0, label: "", state: "idle" });
 
@@ -177,6 +181,7 @@ export default function Editor() {
   const [downloadedUrls, setDownloadedUrls] = useState<string[]>([]);
   const [downloadNoticeUrl, setDownloadNoticeUrl] = useState("");
   const [viewerUrls, setViewerUrls] = useState<string[]>([]);
+  const [viewerPreviewUrls, setViewerPreviewUrls] = useState<string[]>([]);
   const [viewerIndex, setViewerIndex] = useState(0);
   const [pendingUndo, setPendingUndo] = useState<{ item: HistoryItem; index: number } | null>(null);
   const [versionNotice, setVersionNotice] = useState(false);
@@ -369,8 +374,8 @@ export default function Editor() {
     setOutputTab("result");
   }
 
-  function addHistory(url: string, prompt: string, incrementGenerationCount = true) {
-    const item: HistoryItem = { url, prompt, createdAt: new Date().toISOString() };
+  function addHistory(url: string, prompt: string, incrementGenerationCount = true, previewUrl = "") {
+    const item: HistoryItem = { url, previewUrl: previewUrl || undefined, prompt, createdAt: new Date().toISOString() };
     setHistory((current) => {
       const next = freshHistoryItems([item, ...current]);
       localStorage.setItem("pixora-history", JSON.stringify(next));
@@ -406,6 +411,7 @@ export default function Editor() {
     setSingleFile(next!);
     setSinglePreview(URL.createObjectURL(next!));
     setSingleResult("");
+    setSingleResultPreview("");
     setSingleMessage("");
     setSingleProgress({ percent: 0, label: "", state: "idle" });
   }
@@ -423,6 +429,7 @@ export default function Editor() {
       setReferencePreview(URL.createObjectURL(next!));
     }
     setReferenceResult("");
+    setReferenceResultPreview("");
     setReferenceMessage("");
     setReferenceProgress({ percent: 0, label: "", state: "idle" });
   }
@@ -535,9 +542,20 @@ export default function Editor() {
     for (let attempt = 0; attempt < 120; attempt++) {
       if (attempt > 0) await new Promise((resolve) => setTimeout(resolve, 1000));
       const statusResponse = await fetch(`/api/task?id=${encodeURIComponent(taskId)}`, { cache: "no-store" });
-      const status = await statusResponse.json() as { status?: string; output?: string[]; error?: string };
+      const status = await statusResponse.json() as {
+        status?: string;
+        output?: string[];
+        previewUrl?: string;
+        downloadUrl?: string;
+        error?: string;
+      };
       if (!statusResponse.ok) throw new Error(status.error || "Could not check generation.");
-      if (status.status === "succeeded" && status.output?.[0]) return status.output[0];
+      if (status.status === "succeeded" && status.output?.[0]) {
+        return {
+          url: status.downloadUrl || status.output[0],
+          previewUrl: status.previewUrl || status.output[0],
+        };
+      }
       if (status.status === "failed") throw new Error(status.error || "Generation failed");
       onStatus(status.status || "processing");
     }
@@ -627,8 +645,9 @@ export default function Editor() {
         state: "working",
       }));
 
-      setSingleResult(output);
-      addHistory(output, singlePrompt.trim());
+      setSingleResult(output.url);
+      setSingleResultPreview(output.previewUrl);
+      addHistory(output.url, singlePrompt.trim(), true, output.previewUrl);
       setSingleProgress({ percent: 100, label: "Completed", state: "done" });
       if (singleStopRequestedRef.current) setSingleMessage("The task was already accepted by V-Editor, so Pixora finished it safely and stopped.");
     } catch (error) {
@@ -702,8 +721,9 @@ export default function Editor() {
         state: "working",
       }));
 
-      setReferenceResult(output);
-      addHistory(output, referencePrompt.trim());
+      setReferenceResult(output.url);
+      setReferenceResultPreview(output.previewUrl);
+      addHistory(output.url, referencePrompt.trim(), true, output.previewUrl);
       setReferenceProgress({ percent: 100, label: "Completed", state: "done" });
       if (referenceStopRequestedRef.current) setReferenceMessage("The task was already accepted by V-Editor, so Pixora finished it safely and stopped.");
     } catch (error) {
@@ -758,6 +778,7 @@ export default function Editor() {
         ...item,
         taskId: undefined,
         result: undefined,
+        resultPreview: undefined,
         error: undefined,
         progress: item.uploadedUrl ? 48 : 0,
         label: item.uploadedUrl ? "Uploaded · queued" : "Queued",
@@ -829,13 +850,13 @@ export default function Editor() {
           }));
 
           updateBatchItem(id, {
-            result: output,
-            preview: output,
+            result: output.url,
+            resultPreview: output.previewUrl,
             progress: 100,
             label: "Completed",
             status: "done",
           });
-          addHistory(output, batchPrompt.trim(), false);
+          addHistory(output.url, batchPrompt.trim(), false, output.previewUrl);
         } catch (error) {
           if (batchStopRequestedRef.current) {
             const current = batchItemsRef.current.find((entry) => entry.id === id);
@@ -876,50 +897,81 @@ export default function Editor() {
     }
   }
 
-  function downloadProxyUrl(url: string, index = 1, disposition: "attachment" | "inline" = "attachment") {
-    const params = new URLSearchParams({ url: originalImageUrl(url), filename: `pixora-${index}`, disposition });
+  function formatBytes(bytes: number) {
+    if (!Number.isFinite(bytes) || bytes <= 0) return "0 B";
+    const units = ["B", "KB", "MB", "GB", "TB"];
+    const unitIndex = Math.min(units.length - 1, Math.floor(Math.log(bytes) / Math.log(1024)));
+    const value = bytes / Math.pow(1024, unitIndex);
+    return `${value >= 100 || unitIndex === 0 ? value.toFixed(0) : value.toFixed(1)} ${units[unitIndex]}`;
+  }
+
+  function uniqueDownloadNumber() {
+    const key = "pixora-download-sequence";
+    let sequence = 0;
+    try {
+      sequence = (Number(localStorage.getItem(key) || "0") + 1) % 1_000_000;
+      localStorage.setItem(key, String(sequence));
+    } catch {
+      sequence = Math.floor(Math.random() * 1_000_000);
+    }
+    const random = crypto.getRandomValues(new Uint32Array(1))[0] % 1_000_000;
+    return `${Date.now()}${String(sequence).padStart(6, "0")}${String(random).padStart(6, "0")}`;
+  }
+
+  function originalDownloadUrl(
+    url: string,
+    filename = "",
+    disposition: "attachment" | "inline" = "attachment",
+  ) {
+    try {
+      const parsed = new URL(url, window.location.origin);
+      if (parsed.origin === window.location.origin && parsed.pathname === "/api/result") {
+        if (filename) parsed.searchParams.set("filename", filename);
+        parsed.searchParams.set("disposition", disposition);
+        return parsed.toString();
+      }
+    } catch {}
+
+    const params = new URLSearchParams({
+      url: originalImageUrl(url),
+      ...(filename ? { filename } : {}),
+      disposition,
+    });
     return `/api/download?${params.toString()}`;
   }
 
-  async function fetchImage(url: string) {
-    const response = await fetch(downloadProxyUrl(url), { cache: "no-store" });
-    if (!response.ok) {
-      let detail = "Could not download this image.";
-      try { const data = await response.json() as { error?: string }; if (data.error) detail = data.error; } catch {}
-      throw new Error(detail);
-    }
-    const blob = await response.blob();
-    if (!blob.type.startsWith("image/")) throw new Error("The server did not return an image.");
-    return blob;
-  }
-
-  function extensionForBlob(blob: Blob) {
-    if (blob.type.includes("jpeg")) return "jpg";
-    if (blob.type.includes("webp")) return "webp";
-    if (blob.type.includes("gif")) return "gif";
-    if (blob.type.includes("avif")) return "avif";
-    return "png";
-  }
-
-  function saveBlob(blob: Blob, name: string) {
-    const href = URL.createObjectURL(blob);
+  function triggerNativeDownload(url: string, filename: string) {
     const anchor = document.createElement("a");
-    anchor.href = href; anchor.download = name; anchor.style.display = "none";
-    document.body.appendChild(anchor); anchor.click(); anchor.remove();
-    window.setTimeout(() => URL.revokeObjectURL(href), 5000);
+    anchor.href = originalDownloadUrl(url, filename, "attachment");
+    anchor.download = filename;
+    anchor.style.display = "none";
+    document.body.appendChild(anchor);
+    anchor.click();
+    anchor.remove();
   }
 
   async function downloadOne(url: string, index = 1) {
-    setDownloadProgress({ percent: 10, label: "Preparing image…", state: "working" });
+    const filename = `Pixora-${uniqueDownloadNumber()}`;
     try {
-      const blob = await fetchImage(url);
-      setDownloadProgress({ percent: 85, label: "Saving image…", state: "working" });
-      saveBlob(blob, `pixora-${index}.${extensionForBlob(blob)}`);
+      const source = originalDownloadUrl(url, filename, "attachment");
+      const [size] = await probeDownloadSizes([source]);
+      setDownloadProgress({
+        percent: 1,
+        label: size > 0
+          ? `Sending ${formatBytes(size)} original to browser download manager…`
+          : "Sending original to browser download manager…",
+        state: "working",
+      });
+      triggerNativeDownload(url, filename);
       setDownloadedUrls((current) => current.includes(url) ? current : [...current, url]);
-      setDownloadNoticeUrl(url);
+      setDownloadNoticeUrl(previewForUrl(url));
       window.setTimeout(() => setDownloadNoticeUrl(""), 1600);
-      setDownloadProgress({ percent: 100, label: "Downloaded", state: "done" });
-      window.setTimeout(() => setDownloadProgress({ percent: 0, label: "", state: "idle" }), 1800);
+      setDownloadProgress({
+        percent: 100,
+        label: size > 0 ? `Browser download started · ${formatBytes(size)}` : "Browser download started",
+        state: "done",
+      });
+      window.setTimeout(() => setDownloadProgress({ percent: 0, label: "", state: "idle" }), 2200);
     } catch (error) {
       const detail = error instanceof Error ? error.message : "Download failed";
       setSingleMessage(detail);
@@ -929,51 +981,99 @@ export default function Editor() {
 
   async function downloadMany(urls: string[], kind: "zip" | "separate") {
     if (!urls.length) return;
+    const batchId = uniqueDownloadNumber();
+    const sourceUrls = urls.map((url) => originalDownloadUrl(url, "", "inline"));
+    const sizes = await probeDownloadSizes(sourceUrls);
+    const totalBytes = sizes.reduce((sum, size) => sum + size, 0);
+
     if (kind === "separate") {
+      setDownloadProgress({
+        percent: 5,
+        label: totalBytes > 0
+          ? `Sending ${urls.length} originals · ${formatBytes(totalBytes)} total to browser downloads…`
+          : `Sending ${urls.length} originals to browser downloads…`,
+        state: "working",
+      });
       for (let index = 0; index < urls.length; index++) {
-        setDownloadProgress({ percent: (index / urls.length) * 100, label: `Downloading ${index + 1} of ${urls.length}…`, state: "working" });
-        const blob = await fetchImage(urls[index]);
-        saveBlob(blob, `pixora-${index + 1}.${extensionForBlob(blob)}`);
+        triggerNativeDownload(
+          urls[index],
+          `Pixora-${uniqueDownloadNumber()}`,
+        );
         setDownloadedUrls((current) => current.includes(urls[index]) ? current : [...current, urls[index]]);
-        setDownloadProgress({ percent: ((index + 1) / urls.length) * 100, label: `Downloaded ${index + 1} of ${urls.length}`, state: "working" });
+        await new Promise((resolve) => window.setTimeout(resolve, 120));
       }
-      setDownloadProgress({ percent: 100, label: `Downloaded ${urls.length} images`, state: "done" });
+      setDownloadProgress({
+        percent: 100,
+        label: totalBytes > 0
+          ? `${urls.length} browser downloads started · ${formatBytes(totalBytes)} total`
+          : `${urls.length} browser downloads started`,
+        state: "done",
+      });
       return;
     }
-    let fetched = 0;
-    const images = await Promise.all(urls.map(async (url, index) => {
-      const blob = await fetchImage(url);
-      fetched += 1;
-      setDownloadProgress({ percent: (fetched / urls.length) * 85, label: `Adding ${fetched} of ${urls.length} images…`, state: "working" });
-      return { index, blob };
+
+    if (!supportsStreamingZip()) {
+      throw new Error("Large ZIP streaming needs Chrome or Edge desktop. Use Separate files in this browser.");
+    }
+
+    const sources = sourceUrls.map((url, index) => ({
+      url,
+      filename: `Pixora-${batchId}-${String(index + 1).padStart(3, "0")}.png`,
     }));
-    const JSZip = (await import("jszip")).default;
-    const zip = new JSZip();
-    images.forEach(({ index, blob }) => zip.file(`pixora-${index + 1}.${extensionForBlob(blob)}`, blob));
-    const archive = await zip.generateAsync({ type: "blob" }, (metadata) => {
-      setDownloadProgress({ percent: 85 + metadata.percent * 0.15, label: `Creating ZIP · ${Math.round(metadata.percent)}%`, state: "working" });
+
+    setDownloadProgress({
+      percent: 1,
+      label: totalBytes > 0
+        ? `ZIP source size ${formatBytes(totalBytes)} · choose where to save…`
+        : "Choose where to save the ZIP…",
+      state: "working",
     });
-    saveBlob(archive, "pixora-images.zip");
+
+    await streamZipToDisk(sources, `Pixora-${batchId}.zip`, (progress) => {
+      const remaining = Math.max(0, progress.totalBytes - progress.loadedBytes);
+      const sizeText = progress.totalBytes > 0
+        ? `${formatBytes(progress.loadedBytes)} / ${formatBytes(progress.totalBytes)} · ${formatBytes(remaining)} remaining`
+        : `${formatBytes(progress.loadedBytes)} written`;
+      setDownloadProgress({
+        percent: progress.percent,
+        label: `ZIP streaming to disk · ${sizeText} · ${progress.filesDone}/${progress.totalFiles} images`,
+        state: "working",
+      });
+    });
+
     setDownloadedUrls((current) => Array.from(new Set([...current, ...urls])));
-    setDownloadProgress({ percent: 100, label: "ZIP downloaded", state: "done" });
+    setDownloadProgress({
+      percent: 100,
+      label: totalBytes > 0 ? `ZIP saved · ${formatBytes(totalBytes)} source data` : "ZIP saved",
+      state: "done",
+    });
   }
 
   async function downloadSelected(kind: "zip" | "separate") {
     if (!selected.length) return;
-    setDownloading(true); setDownloadMenu(false); setSingleMessage("");
-    try { await downloadMany(selected, kind); } catch (error) { setSingleMessage(error instanceof Error ? error.message : "Download failed"); }
-    finally {
+    setDownloading(true);
+    setDownloadMenu(false);
+    setSingleMessage("");
+    try {
+      await downloadMany(selected, kind);
+    } catch (error) {
+      setSingleMessage(error instanceof Error ? error.message : "Download failed");
+    } finally {
       setDownloading(false);
-      window.setTimeout(() => setDownloadProgress({ percent: 0, label: "", state: "idle" }), 1800);
+      window.setTimeout(() => setDownloadProgress({ percent: 0, label: "", state: "idle" }), 3200);
     }
   }
 
   async function downloadBatch(kind: "zip" | "separate") {
-    setBatchDownloading(true); setBatchMessage("");
-    try { await downloadMany(batchResults, kind); } catch (error) { setBatchMessage(error instanceof Error ? error.message : "Download failed"); }
-    finally {
+    setBatchDownloading(true);
+    setBatchMessage("");
+    try {
+      await downloadMany(batchResults, kind);
+    } catch (error) {
+      setBatchMessage(error instanceof Error ? error.message : "Download failed");
+    } finally {
       setBatchDownloading(false);
-      window.setTimeout(() => setDownloadProgress({ percent: 0, label: "", state: "idle" }), 1800);
+      window.setTimeout(() => setDownloadProgress({ percent: 0, label: "", state: "idle" }), 3200);
     }
   }
 
@@ -1051,8 +1151,9 @@ export default function Editor() {
   function batchDrop(event: DragEvent<HTMLDivElement>) { event.preventDefault(); if (!isProcessing) addBatchFiles(event.dataTransfer.files); }
   function referenceDrop(kind: "main" | "reference", event: DragEvent<HTMLDivElement>) { event.preventDefault(); if (!isProcessing) setReferenceFile(kind, event.dataTransfer.files[0]); }
 
-  function openViewer(urls: string[], index: number) {
+  function openViewer(urls: string[], index: number, previews?: string[]) {
     setViewerUrls(urls);
+    setViewerPreviewUrls(previews?.length === urls.length ? previews : urls);
     setViewerIndex(index);
   }
 
@@ -1072,6 +1173,18 @@ export default function Editor() {
   }, [viewerUrls.length]);
 
   const activeResult = mode === "single" ? singleResult : mode === "reference" ? referenceResult : "";
+  const activeResultPreview = mode === "single" ? singleResultPreview : mode === "reference" ? referenceResultPreview : "";
+  const batchPreviewResults = batchItems.filter((item) => item.result).map((item) => item.resultPreview || item.result!);
+
+  function previewForUrl(url: string) {
+    const historyItem = history.find((item) => item.url === url);
+    if (historyItem?.previewUrl) return historyItem.previewUrl;
+    const batchItem = batchItems.find((item) => item.result === url);
+    if (batchItem?.resultPreview) return batchItem.resultPreview;
+    if (url === singleResult && singleResultPreview) return singleResultPreview;
+    if (url === referenceResult && referenceResultPreview) return referenceResultPreview;
+    return url;
+  }
 
   return <main className="shell">
     <nav className="nav"><a className="brand" href="#top" aria-label="Pixora home"><span className="brandMark">P</span><span>Pixora</span><small className="versionBadge">v{APP_VERSION}</small></a><div className="navActions"><span className="statusDot"><i /> V-Editor connected</span><a href="#how">How it works</a>{accountEmail ? <div className="accountChip"><span>{accountEmail}</span><button type="button" disabled={isProcessing} onClick={() => void signOutAccount()}>Sign out</button></div> : <button type="button" className="accountLoginButton" onClick={() => { setAuthMessage(""); setAuthOpen(true); }}>Sign in</button>}</div></nav>
@@ -1103,7 +1216,7 @@ export default function Editor() {
           <div className="batchPane">
             <div className="batchToolbar"><strong>Selected images</strong><div>{batchItems.length > 0 && <button type="button" onClick={clearBatch} disabled={isProcessing}>Clear all</button>}<button type="button" onClick={() => batchInputRef.current?.click()} disabled={isProcessing || batchItems.length >= MAX_BATCH}>+ Add images</button></div></div>
             <input ref={batchInputRef} disabled={isProcessing} type="file" multiple accept="image/png,image/jpeg,image/webp" hidden onChange={(e: ChangeEvent<HTMLInputElement>) => { if (e.target.files) addBatchFiles(e.target.files); e.target.value = ""; }} />
-            {batchItems.length === 0 ? <div className="dropzone batchDropzone" onClick={() => batchInputRef.current?.click()} onDrop={batchDrop} onDragOver={(e) => e.preventDefault()} role="button" tabIndex={0}><UploadEmpty title={`Drop up to ${MAX_BATCH} images`} subtitle="One shared prompt will be applied to every image" button="Choose images" /></div> : <div className="batchGrid" onDrop={batchDrop} onDragOver={(e) => e.preventDefault()}>{batchItems.map((item, index) => <article key={item.id} className={`batchCard ${item.status}`}><div className="batchThumb"><img src={displayImageUrl(item.result || item.preview, 520, 86)} alt={item.result ? `Generated result ${index + 1}` : `Batch source ${index + 1}`} loading="lazy" decoding="async" />{!batchBusy && <button type="button" onClick={() => removeBatchItem(item.id)} aria-label={`Remove image ${index + 1}`}>×</button>}</div><div className="batchCardMeta"><span>{index + 1}</span><div><strong>{item.status === "done" ? "Done" : item.status === "failed" ? "Failed" : item.status === "stopped" ? "Stopped" : item.label}</strong><div className="miniProgress"><i style={{ width: `${item.progress}%` }} /></div></div><b>{Math.round(item.progress)}%</b></div>{item.result && <div className="batchResultActions"><button type="button" onClick={() => downloadOne(item.result!, index + 1)}>↓ Download</button><a href={originalImageUrl(item.result!)} target="_blank" rel="noopener noreferrer">Open ↗</a></div>}</article>)}</div>}
+            {batchItems.length === 0 ? <div className="dropzone batchDropzone" onClick={() => batchInputRef.current?.click()} onDrop={batchDrop} onDragOver={(e) => e.preventDefault()} role="button" tabIndex={0}><UploadEmpty title={`Drop up to ${MAX_BATCH} images`} subtitle="One shared prompt will be applied to every image" button="Choose images" /></div> : <div className="batchGrid" onDrop={batchDrop} onDragOver={(e) => e.preventDefault()}>{batchItems.map((item, index) => <article key={item.id} className={`batchCard ${item.status}`}><div className="batchThumb"><img src={displayImageUrl(item.resultPreview || item.result || item.preview, 520, 86)} alt={item.result ? `Generated result ${index + 1}` : `Batch source ${index + 1}`} loading="lazy" decoding="async" />{!batchBusy && <button type="button" onClick={() => removeBatchItem(item.id)} aria-label={`Remove image ${index + 1}`}>×</button>}</div><div className="batchCardMeta"><span>{index + 1}</span><div><strong>{item.status === "done" ? "Done" : item.status === "failed" ? "Failed" : item.status === "stopped" ? "Stopped" : item.label}</strong><div className="miniProgress"><i style={{ width: `${item.progress}%` }} /></div></div><b>{Math.round(item.progress)}%</b></div>{item.result && <div className="batchResultActions"><button type="button" onClick={() => downloadOne(item.result!, index + 1)}>↓ Download</button><a href={originalDownloadUrl(item.result!, "", "inline")} target="_blank" rel="noopener noreferrer">Open ↗</a></div>}</article>)}</div>}
           </div>
           <div className="controls"><div className="controlHeading"><span className="step">02</span><h2>Shared batch prompt</h2></div><label className="promptLabel" htmlFor="batch-prompt">PROMPT FOR ALL IMAGES</label><textarea id="batch-prompt" value={batchPrompt} onChange={(e) => setBatchPrompt(e.target.value)} placeholder="Apply the same edit to every selected image…" maxLength={700} /><div className="promptMeta"><button type="button" onClick={() => setBatchPrompt("Give every image a clean cinematic color grade while preserving the subject and composition.")}>✦ Try an example</button><span>{batchPrompt.length}/700</span></div><RatioPicker value={batchRatio} onChange={setBatchRatio} /><PreserveControls preserveFace={preserveFace} preservePose={preservePose} onFace={setPreserveFace} onPose={setPreservePose} /><ProgressBar progress={batchProgress} /><div className="runActions"><button type="button" className="generate" disabled={!batchItems.length || !batchPrompt.trim() || batchBusy} onClick={generateBatch}>{batchBusy ? <><span className="spinner" /> Processing {batchDone}/{batchItems.length}</> : <>Generate {batchItems.length || ""} image{batchItems.length === 1 ? "" : "s"} <span>→</span></>}</button>{batchBusy && <button type="button" className="stopAction" disabled={batchStopRequested} onClick={requestBatchStop}>{batchStopRequested ? "Stopping…" : "■ Stop"}</button>}</div>{batchMessage && <p className="error">{batchMessage}</p>}<p className="fineprint">Memory-safe queue: uploads are controlled and only a few V-Editor jobs run at once for faster batch completion.</p></div>
         </div>
@@ -1129,23 +1242,27 @@ export default function Editor() {
           {batchResults.length ? <>
             <div className="batchOutputHead"><div><strong>{batchResults.length} result{batchResults.length === 1 ? "" : "s"} ready</strong><small>{batchBusy ? `${batchDone}/${batchItems.length} completed · queue active` : batchStopped ? `${batchStopped} stopped` : batchFailed ? `${batchFailed} failed` : "Batch completed"}</small></div><div><button type="button" disabled={batchDownloading} onClick={() => void downloadBatch("zip")}>{batchDownloading ? "Preparing…" : "↓ Download ZIP"}</button><button type="button" disabled={batchDownloading} onClick={() => void downloadBatch("separate")}>Separate files</button></div></div>
             <div className="batchOutputGrid">{batchItems.filter((item) => item.result).map((item, index) => <article key={item.id}>
-              <div className={`downloadVisual ${downloadedUrls.includes(item.result!) ? "downloaded" : ""}`} onClick={() => openViewer(batchResults, index)} role="button" tabIndex={0}><img src={displayImageUrl(item.result!, 900, 88)} alt={`Batch result ${index + 1}`} loading="lazy" decoding="async" /><span className="downloadCheck">✓<small>Downloaded</small></span></div>
-              <div><button type="button" onClick={() => void downloadOne(item.result!, index + 1)}>↓ Download</button><a href={originalImageUrl(item.result!)} target="_blank" rel="noopener noreferrer">Open full size ↗</a></div>
+              <div className={`downloadVisual ${downloadedUrls.includes(item.result!) ? "downloaded" : ""}`} onClick={() => openViewer(batchResults, index, batchPreviewResults)} role="button" tabIndex={0}><img src={displayImageUrl(item.resultPreview || item.result!, 900, 88)} alt={`Batch result ${index + 1}`} loading="lazy" decoding="async" /><span className="downloadCheck">✓<small>Downloaded</small></span></div>
+              <div><button type="button" onClick={() => void downloadOne(item.result!, index + 1)}>↓ Download</button><a href={originalDownloadUrl(item.result!, "", "inline")} target="_blank" rel="noopener noreferrer">Open full size ↗</a></div>
             </article>)}</div>
           </> : <div className="emptyResult"><span>✦</span><h3>Your batch results will appear here</h3><p>Add up to {MAX_BATCH} images, use one prompt, and generate them together.</p></div>}
         </div> : <div className="resultArea">
           {activeResult ? <div className="resultCard">
             <div className={`downloadVisual ${downloadedUrls.includes(activeResult) ? "downloaded" : ""}`} onClick={() => {
               const index = history.findIndex((item) => item.url === activeResult);
-              openViewer(index >= 0 ? history.map((item) => item.url) : [activeResult], index >= 0 ? index : 0);
-            }} role="button" tabIndex={0}><img src={displayImageUrl(activeResult, 1200, 90)} alt="AI generated edit" decoding="async" /><span className="downloadCheck">✓<small>Downloaded</small></span></div>
-            <div className="resultActions"><button type="button" onClick={() => void downloadOne(activeResult)}>↓ Download</button><a href={originalImageUrl(activeResult)} target="_blank" rel="noopener noreferrer">Open full size ↗</a></div>
+              openViewer(
+                index >= 0 ? history.map((item) => item.url) : [activeResult],
+                index >= 0 ? index : 0,
+                index >= 0 ? history.map((item) => item.previewUrl || item.url) : [activeResultPreview || activeResult],
+              );
+            }} role="button" tabIndex={0}><img src={displayImageUrl(activeResultPreview || activeResult, 1200, 90)} alt="AI generated edit" decoding="async" /><span className="downloadCheck">✓<small>Downloaded</small></span></div>
+            <div className="resultActions"><button type="button" onClick={() => void downloadOne(activeResult)}>↓ Download</button><a href={originalDownloadUrl(activeResult, "", "inline")} target="_blank" rel="noopener noreferrer">Open full size ↗</a></div>
           </div> : <div className="emptyResult"><span>✦</span><h3>Your creation will appear here</h3><p>{mode === "reference" ? "Add a main image, reference image, and prompt." : "Upload an image, write a prompt, and let Pixora do the rest."}</p></div>}
         </div> : <div className={`historyGrid ${selecting ? "selecting" : ""}`}>
-          {history.length ? history.map((item, index) => <article key={item.createdAt} className={selected.includes(item.url) ? "selected" : ""} onClick={() => selecting ? toggleSelection(item.url) : openViewer(history.map((entry) => entry.url), index)} role="button" tabIndex={0} onKeyDown={(event) => event.key === "Enter" && (selecting ? toggleSelection(item.url) : openViewer(history.map((entry) => entry.url), index))}>
+          {history.length ? history.map((item, index) => <article key={item.createdAt} className={selected.includes(item.url) ? "selected" : ""} onClick={() => selecting ? toggleSelection(item.url) : openViewer(history.map((entry) => entry.url), index, history.map((entry) => entry.previewUrl || entry.url))} role="button" tabIndex={0} onKeyDown={(event) => event.key === "Enter" && (selecting ? toggleSelection(item.url) : openViewer(history.map((entry) => entry.url), index, history.map((entry) => entry.previewUrl || entry.url)))}>
             {selecting && <span className="check">{selected.includes(item.url) ? "✓" : ""}</span>}
             {!selecting && <button type="button" className="historyDelete" disabled={isProcessing} aria-label="Remove image from history" onClick={(event) => { event.stopPropagation(); removeHistoryItem(item, index); }}>×</button>}
-            <div className={`downloadVisual ${downloadedUrls.includes(item.url) ? "downloaded" : ""}`}><img src={displayImageUrl(item.url, 720, 86)} alt={item.prompt} loading="lazy" decoding="async" /><span className="downloadCheck">✓<small>Downloaded</small></span></div>
+            <div className={`downloadVisual ${downloadedUrls.includes(item.url) ? "downloaded" : ""}`}><img src={displayImageUrl(item.previewUrl || item.url, 720, 86)} alt={item.prompt} loading="lazy" decoding="async" /><span className="downloadCheck">✓<small>Downloaded</small></span></div>
             <div className="historyCaption"><span>{item.prompt}</span>{!selecting && <button type="button" aria-label="Download image" onClick={(event) => { event.stopPropagation(); void downloadOne(item.url, index + 1); }}>↓</button>}</div>
           </article>) : <div className="emptyResult"><h3>No edits yet</h3><p>Edits are kept for 1 hour. Sign in to sync them across devices.</p></div>}
         </div>}
@@ -1177,7 +1294,7 @@ export default function Editor() {
         if (Math.abs(distance) > 45 && viewerUrls.length > 1) moveViewer(distance > 0 ? -1 : 1);
         swipeStart.current = null;
       }}>
-        <img src={originalImageUrl(viewerUrls[viewerIndex])} alt={`Preview ${viewerIndex + 1} of ${viewerUrls.length}`} />
+        <img src={viewerPreviewUrls[viewerIndex] || viewerUrls[viewerIndex]} alt={`Preview ${viewerIndex + 1} of ${viewerUrls.length}`} />
         <span>{viewerIndex + 1} / {viewerUrls.length}</span>
       </div>
       {viewerUrls.length > 1 && <button type="button" className="viewerNext" onClick={(event) => { event.stopPropagation(); moveViewer(1); }} aria-label="Next image">›</button>}
