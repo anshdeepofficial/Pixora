@@ -30,9 +30,11 @@ export async function GET(request: Request) {
 
   const output = data.result.output;
   let previewUrl: string | undefined;
+  let downloadUrl: string | undefined;
 
   if (data.result.status === "succeeded" && data.result.output?.[0]) {
     const originalOutput = data.result.output[0];
+    downloadUrl = new URL(`/api/result?id=${encodeURIComponent(packedId)}`, request.url).toString();
 
     if (imageKitConfigured()) {
       try {
@@ -66,6 +68,7 @@ export async function GET(request: Request) {
     status: data.result.status,
     output,
     previewUrl,
+    downloadUrl,
     error: data.result.error,
   }, { headers: { "Cache-Control": "no-store" } });
 }
