@@ -10,7 +10,7 @@ const LEGACY_ACTIVE_JOB_KEY = "pixora-active-job-v3";
 const BRIDGE_BATCH_KEY = "pixora-bridge-last-batch-v1";
 const RECOVERY_DB = "pixora-job-recovery";
 const RECOVERY_STORE = "files";
-const MAX_JOB_AGE = 24 * 60 * 60 * 1000;
+const MAX_JOB_AGE = 60 * 60 * 1000;
 const POLL_MS = 1200;
 
 function bootId() {
@@ -41,8 +41,15 @@ function mergeHistory(output, prompt) {
   try {
     const current = JSON.parse(localStorage.getItem("pixora-history") || "[]");
     if (current.some((item) => item?.url === output)) return;
-    const next = [{ url: output, prompt: prompt || "Recovered generation", createdAt: new Date().toISOString() }, ...current];
+    const item = { url: output, prompt: prompt || "Recovered generation", createdAt: new Date().toISOString() };
+    const cutoff = Date.now() - MAX_JOB_AGE;
+    const next = [item, ...current].filter((entry) => new Date(entry?.createdAt || 0).getTime() > cutoff);
     localStorage.setItem("pixora-history", JSON.stringify(next));
+    void fetch("/api/account-history", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(item),
+    }).catch(() => undefined);
   } catch {}
 }
 
