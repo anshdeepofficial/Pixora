@@ -126,6 +126,23 @@ export async function listImageKitAssets(path: string, limit = 1000) {
   return data;
 }
 
+function imageKitSearchValue(value: string) {
+  return value.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
+}
+
+export async function findImageKitAssetByName(folder: string, name: string) {
+  const normalizedFolder = `/${folder.replace(/^\/+|\/+$/g, "")}/`;
+  const searchQuery = `name = "${imageKitSearchValue(name)}" AND path = "${imageKitSearchValue(normalizedFolder)}"`;
+  const params = new URLSearchParams({ searchQuery, limit: "1", type: "file" });
+  const response = await imageKitApi(`/files?${params.toString()}`);
+  const data = await response.json().catch(() => []) as ImageKitAsset[] | { message?: string };
+  if (!response.ok || !Array.isArray(data)) {
+    throw new Error(!Array.isArray(data) && data.message ? data.message : `Could not find ImageKit file (${response.status}).`);
+  }
+  return data[0] || null;
+}
+
+
 export async function getImageKitAsset(fileId: string) {
   const response = await imageKitApi(`/files/${encodeURIComponent(fileId)}/details`);
   if (response.status === 404) return null;
