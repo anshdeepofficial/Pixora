@@ -35,6 +35,7 @@ export type AccountSession = {
 
 export type AccountHistoryItem = {
   url: string;
+  previewUrl?: string;
   prompt: string;
   createdAt: string;
 };
@@ -242,6 +243,7 @@ export async function saveAccountHistoryItem(accountId: string, input: AccountHi
   if (!input.url?.startsWith("https://")) throw new Error("Invalid generated image URL.");
   const item: AccountHistoryItem = {
     url: input.url.slice(0, 3000),
+    previewUrl: input.previewUrl?.startsWith("https://") ? input.previewUrl.slice(0, 3000) : undefined,
     prompt: String(input.prompt || "").slice(0, 1000),
     createdAt: new Date(input.createdAt || Date.now()).toISOString(),
   };
