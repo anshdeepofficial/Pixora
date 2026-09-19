@@ -6,12 +6,14 @@ import { upload } from "@vercel/blob/client";
 const ratios = ["default", "1:1", "3:2", "2:3", "9:16", "16:9", "3:4", "4:3"];
 const MAX_BATCH = 50;
 const MAX_FILE_BYTES = 12 * 1024 * 1024;
-const APP_VERSION = "1.1.2";
+const BATCH_PIPELINE_CONCURRENCY = 4;
+const APP_VERSION = "1.2.0";
 const APP_VERSION_KEY = "pixora-app-version";
 
 type Mode = "single" | "batch" | "reference";
 type OutputTab = "result" | "history";
-type ProgressState = { percent: number; label: string; state: "idle" | "working" | "done" | "error" };
+type ProgressState = { percent: number; label: string; state: "idle" | "working" | "done" | "error" | "stopped" };
+type GenerationStage = "idle" | "uploading" | "submitting" | "processing";
 type HistoryItem = { url: string; prompt: string; createdAt: string };
 type BatchStatus = "ready" | "uploading" | "queued" | "processing" | "done" | "failed" | "stopped";
 type BatchItem = {
@@ -103,6 +105,10 @@ export default function Editor() {
   const [singlePrompt, setSinglePrompt] = useState("");
   const [singleRatio, setSingleRatio] = useState("default");
   const [singleBusy, setSingleBusy] = useState(false);
+  const [singleStopRequested, setSingleStopRequested] = useState(false);
+  const singleStopRequestedRef = useRef(false);
+  const singleStageRef = useRef<GenerationStage>("idle");
+  const singleUploadAbortRef = useRef<AbortController | null>(null);
   const [singleResult, setSingleResult] = useState("");
   const [singleMessage, setSingleMessage] = useState("");
   const [singleProgress, setSingleProgress] = useState<ProgressState>({ percent: 0, label: "", state: "idle" });
@@ -128,6 +134,10 @@ export default function Editor() {
   const [referencePrompt, setReferencePrompt] = useState("");
   const [referenceRatio, setReferenceRatio] = useState("default");
   const [referenceBusy, setReferenceBusy] = useState(false);
+  const [referenceStopRequested, setReferenceStopRequested] = useState(false);
+  const referenceStopRequestedRef = useRef(false);
+  const referenceStageRef = useRef<GenerationStage>("idle");
+  const referenceUploadAbortRef = useRef<AbortController | null>(null);
   const [referenceResult, setReferenceResult] = useState("");
   const [referenceMessage, setReferenceMessage] = useState("");
   const [referenceProgress, setReferenceProgress] = useState<ProgressState>({ percent: 0, label: "", state: "idle" });
@@ -243,10 +253,11 @@ export default function Editor() {
     }
   }
 
-  async function uploadImage(image: File, onProgress?: (percentage: number) => void) {
+  async function uploadImage(image: File, onProgress?: (percentage: number) => void, signal?: AbortSignal) {
     const blob = await upload(`pixora-inputs/${Date.now()}-${crypto.randomUUID()}-${image.name.replace(/[^a-zA-Z0-9._-]/g, "-")}`, image, {
       access: "public",
       handleUploadUrl: "/api/upload",
+      signal,
       onUploadProgress(event) { onProgress?.(event.percentage); },
     });
     return blob.url;
@@ -340,6 +351,11 @@ export default function Editor() {
     updateBatchItem(item.id, { error: undefined, progress: Math.max(1, current.progress), label: "Queued for upload…", status: "uploading" });
     const promise = new Promise<string>((resolve, reject) => {
       batchUploadQueueRef.current.push(() => {
+        if (batchStopRequestedRef.current) {
+          batchUploadPromisesRef.current.delete(item.id);
+          reject(new Error("Batch stopped."));
+          return;
+        }
         activeBatchUploadsRef.current += 1;
         updateBatchItem(item.id, { label: "Uploading…", status: "uploading" });
         void uploadImage(current.file!, (percentage) => {
@@ -404,51 +420,177 @@ export default function Editor() {
     return 72;
   }
 
+  function confirmGenerationStop(label: string) {
+    const first = window.confirm(`Stop ${label}? Work that has not reached V-Editor will be cancelled.`);
+    if (!first) return false;
+    return window.confirm(
+      `Confirm stop again. If V-Editor already accepted the current task, Pixora will let that task finish so the generation credit/result is not wasted.`
+    );
+  }
+
+  function requestSingleStop() {
+    if (!singleBusy || singleStopRequestedRef.current || !confirmGenerationStop("this edit")) return;
+    singleStopRequestedRef.current = true;
+    setSingleStopRequested(true);
+    if (singleStageRef.current === "uploading") {
+      singleUploadAbortRef.current?.abort();
+      setSingleMessage("Stopping upload…");
+    } else {
+      setSingleMessage("Stop requested. An already-submitted V-Editor task will finish safely.");
+    }
+  }
+
+  function requestReferenceStop() {
+    if (!referenceBusy || referenceStopRequestedRef.current || !confirmGenerationStop("this reference edit")) return;
+    referenceStopRequestedRef.current = true;
+    setReferenceStopRequested(true);
+    if (referenceStageRef.current === "uploading") {
+      referenceUploadAbortRef.current?.abort();
+      setReferenceMessage("Stopping uploads…");
+    } else {
+      setReferenceMessage("Stop requested. An already-submitted V-Editor task will finish safely.");
+    }
+  }
+
   async function generateSingle() {
     if (!validImage(singleFile) || !singlePrompt.trim()) { setSingleMessage("Choose an image and enter a prompt."); return; }
-    setSingleBusy(true); setSingleMessage(""); setOutputTab("result");
+
+    singleStopRequestedRef.current = false;
+    setSingleStopRequested(false);
+    setSingleBusy(true);
+    setSingleMessage("");
+    setOutputTab("result");
     setSingleProgress({ percent: 1, label: "Starting upload…", state: "working" });
+
+    const uploadController = new AbortController();
+    singleUploadAbortRef.current = uploadController;
+
     try {
-      const imageUrl = await uploadImage(singleFile!, (percentage) => setSingleProgress({ percent: Math.max(1, percentage * 0.45), label: `Uploading image · ${Math.round(percentage)}%`, state: "working" }));
+      singleStageRef.current = "uploading";
+      const imageUrl = await uploadImage(
+        singleFile!,
+        (percentage) => setSingleProgress({ percent: Math.max(1, percentage * 0.45), label: `Uploading image · ${Math.round(percentage)}%`, state: "working" }),
+        uploadController.signal,
+      );
+
+      if (singleStopRequestedRef.current) {
+        setSingleProgress({ percent: 100, label: "Stopped before AI generation", state: "stopped" });
+        setSingleMessage("Stopped before V-Editor generation started.");
+        return;
+      }
+
+      singleStageRef.current = "submitting";
       setSingleProgress({ percent: 50, label: "Creating V-Editor task…", state: "working" });
       const prompt = applyPreservation(singlePrompt, preserveFace, preservePose);
-      const create = await fetch("/api/generate", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ imageUrl, prompt, aspectRatio: singleRatio }) });
+      const create = await fetch("/api/generate", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ imageUrl, prompt, aspectRatio: singleRatio }),
+      });
       const created = await create.json() as { taskId?: string; error?: string };
       if (!create.ok || !created.taskId) throw new Error(created.error || "Could not start generation");
-      setSingleProgress({ percent: 60, label: "Task accepted by V-Editor…", state: "working" });
-      const output = await pollTask(created.taskId, (status) => setSingleProgress({ percent: taskPercent(status), label: `V-Editor ${status.replace(/_/g, " ")}…`, state: "working" }));
-      setSingleResult(output); addHistory(output, singlePrompt.trim());
+
+      singleStageRef.current = "processing";
+      setSingleProgress({ percent: 60, label: singleStopRequestedRef.current ? "Stop requested · finishing accepted task…" : "Task accepted by V-Editor…", state: "working" });
+      const output = await pollTask(created.taskId, (status) => setSingleProgress({
+        percent: taskPercent(status),
+        label: singleStopRequestedRef.current ? "Stop requested · finishing accepted task…" : `V-Editor ${status.replace(/_/g, " ")}…`,
+        state: "working",
+      }));
+
+      setSingleResult(output);
+      addHistory(output, singlePrompt.trim());
       setSingleProgress({ percent: 100, label: "Completed", state: "done" });
+      if (singleStopRequestedRef.current) setSingleMessage("The task was already accepted by V-Editor, so Pixora finished it safely and stopped.");
     } catch (error) {
-      const detail = error instanceof Error ? error.message : "Something went wrong";
-      setSingleMessage(detail); setSingleProgress((current) => ({ ...current, label: detail, state: "error" }));
-    } finally { setSingleBusy(false); }
+      if (singleStopRequestedRef.current && singleStageRef.current === "uploading") {
+        setSingleProgress({ percent: 100, label: "Stopped", state: "stopped" });
+        setSingleMessage("Generation stopped before V-Editor received the image.");
+      } else {
+        const detail = error instanceof Error ? error.message : "Something went wrong";
+        setSingleMessage(detail);
+        setSingleProgress((current) => ({ ...current, label: detail, state: "error" }));
+      }
+    } finally {
+      singleStageRef.current = "idle";
+      singleUploadAbortRef.current = null;
+      setSingleBusy(false);
+    }
   }
 
   async function generateReference() {
-    if (!validImage(referenceMain) || !validImage(referenceImage) || !referencePrompt.trim()) { setReferenceMessage("Choose both images and enter a prompt."); return; }
-    setReferenceBusy(true); setReferenceMessage(""); setOutputTab("result");
-    let mainUpload = 0; let refUpload = 0;
-    const syncProgress = () => setReferenceProgress({ percent: Math.max(1, ((mainUpload + refUpload) / 2) * 0.45), label: `Uploading both images · ${Math.round((mainUpload + refUpload) / 2)}%`, state: "working" });
+    if (!validImage(referenceMain) || !validImage(referenceImage) || !referencePrompt.trim()) {
+      setReferenceMessage("Choose both images and enter a prompt.");
+      return;
+    }
+
+    referenceStopRequestedRef.current = false;
+    setReferenceStopRequested(false);
+    setReferenceBusy(true);
+    setReferenceMessage("");
+    setOutputTab("result");
+
+    const uploadController = new AbortController();
+    referenceUploadAbortRef.current = uploadController;
+    let mainUpload = 0;
+    let refUpload = 0;
+    const syncProgress = () => setReferenceProgress({
+      percent: Math.max(1, ((mainUpload + refUpload) / 2) * 0.45),
+      label: `Uploading both images · ${Math.round((mainUpload + refUpload) / 2)}%`,
+      state: "working",
+    });
     setReferenceProgress({ percent: 1, label: "Starting uploads…", state: "working" });
+
     try {
+      referenceStageRef.current = "uploading";
       const [imageUrl, referenceImageUrl] = await Promise.all([
-        uploadImage(referenceMain!, (percentage) => { mainUpload = percentage; syncProgress(); }),
-        uploadImage(referenceImage!, (percentage) => { refUpload = percentage; syncProgress(); }),
+        uploadImage(referenceMain!, (percentage) => { mainUpload = percentage; syncProgress(); }, uploadController.signal),
+        uploadImage(referenceImage!, (percentage) => { refUpload = percentage; syncProgress(); }, uploadController.signal),
       ]);
+
+      if (referenceStopRequestedRef.current) {
+        setReferenceProgress({ percent: 100, label: "Stopped before AI generation", state: "stopped" });
+        setReferenceMessage("Stopped before V-Editor generation started.");
+        return;
+      }
+
+      referenceStageRef.current = "submitting";
       setReferenceProgress({ percent: 50, label: "Creating reference edit task…", state: "working" });
       const prompt = applyPreservation(referencePrompt, preserveFace, preservePose, true);
-      const create = await fetch("/api/generate", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ imageUrl, referenceImageUrl, prompt, aspectRatio: referenceRatio }) });
+      const create = await fetch("/api/generate", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ imageUrl, referenceImageUrl, prompt, aspectRatio: referenceRatio }),
+      });
       const created = await create.json() as { taskId?: string; error?: string };
       if (!create.ok || !created.taskId) throw new Error(created.error || "Could not start generation");
-      setReferenceProgress({ percent: 60, label: "Reference task accepted…", state: "working" });
-      const output = await pollTask(created.taskId, (status) => setReferenceProgress({ percent: taskPercent(status), label: `V-Editor ${status.replace(/_/g, " ")}…`, state: "working" }));
-      setReferenceResult(output); addHistory(output, referencePrompt.trim());
+
+      referenceStageRef.current = "processing";
+      setReferenceProgress({ percent: 60, label: referenceStopRequestedRef.current ? "Stop requested · finishing accepted task…" : "Reference task accepted…", state: "working" });
+      const output = await pollTask(created.taskId, (status) => setReferenceProgress({
+        percent: taskPercent(status),
+        label: referenceStopRequestedRef.current ? "Stop requested · finishing accepted task…" : `V-Editor ${status.replace(/_/g, " ")}…`,
+        state: "working",
+      }));
+
+      setReferenceResult(output);
+      addHistory(output, referencePrompt.trim());
       setReferenceProgress({ percent: 100, label: "Completed", state: "done" });
+      if (referenceStopRequestedRef.current) setReferenceMessage("The task was already accepted by V-Editor, so Pixora finished it safely and stopped.");
     } catch (error) {
-      const detail = error instanceof Error ? error.message : "Something went wrong";
-      setReferenceMessage(detail); setReferenceProgress((current) => ({ ...current, label: detail, state: "error" }));
-    } finally { setReferenceBusy(false); }
+      if (referenceStopRequestedRef.current && referenceStageRef.current === "uploading") {
+        setReferenceProgress({ percent: 100, label: "Stopped", state: "stopped" });
+        setReferenceMessage("Reference generation stopped before V-Editor received the images.");
+      } else {
+        const detail = error instanceof Error ? error.message : "Something went wrong";
+        setReferenceMessage(detail);
+        setReferenceProgress((current) => ({ ...current, label: detail, state: "error" }));
+      }
+    } finally {
+      referenceStageRef.current = "idle";
+      referenceUploadAbortRef.current = null;
+      setReferenceBusy(false);
+    }
   }
 
   function requestBatchStop() {
@@ -479,8 +621,6 @@ export default function Editor() {
     setBatchMessage("");
     setOutputTab("result");
 
-    // Keep only lightweight IDs in this function. Holding a snapshot of every BatchItem
-    // would also hold all 50 File objects until the whole batch finishes.
     const itemIds = batchItemsRef.current.map((item) => item.id);
     const prompt = applyPreservation(batchPrompt, preserveFace, preservePose);
 
@@ -491,7 +631,7 @@ export default function Editor() {
         result: undefined,
         error: undefined,
         progress: item.uploadedUrl ? 48 : 0,
-        label: item.uploadedUrl ? "Uploaded · waiting to generate" : "Waiting in queue",
+        label: item.uploadedUrl ? "Uploaded · queued" : "Queued",
         status: item.uploadedUrl ? "queued" as BatchStatus : "ready" as BatchStatus,
       }));
       batchItemsRef.current = next;
@@ -499,15 +639,14 @@ export default function Editor() {
     });
 
     try {
-      // Stream the batch end-to-end one image at a time:
-      // upload -> create V-Editor task -> poll -> show result -> release local source -> next.
-      // The first result therefore does not wait for the other 49 uploads.
-      for (let index = 0; index < itemIds.length; index++) {
-        if (batchStopRequestedRef.current) break;
+      // Bounded streaming queue: only a few images are active end-to-end at once.
+      // Uploads themselves remain one-at-a-time, while accepted V-Editor jobs can run
+      // in parallel so the model is never idle and 50-image batches do not become serial.
+      await mapLimit(itemIds, BATCH_PIPELINE_CONCURRENCY, async (id, index) => {
+        if (batchStopRequestedRef.current) return;
 
-        const id = itemIds[index];
         const item = batchItemsRef.current.find((entry) => entry.id === id);
-        if (!item) continue;
+        if (!item) return;
 
         try {
           updateBatchItem(id, {
@@ -518,22 +657,21 @@ export default function Editor() {
           });
 
           const uploadedUrl = item.uploadedUrl || await startBatchUpload(item);
-
-          // Once Vercel/ImageKit has the source, do not keep the original File/blob URL alive.
-          // This is the key memory release for large 50-image selections.
           releaseBatchLocalSource(id, uploadedUrl);
 
           if (batchStopRequestedRef.current) {
             updateBatchItem(id, { uploadedUrl, progress: 48, label: "Stopped before AI generation", status: "stopped" });
-            break;
+            return;
           }
 
-          updateBatchItem(id, { uploadedUrl, progress: 50, label: "Creating V-Editor task…", status: "queued" });
+          updateBatchItem(id, { uploadedUrl, progress: 52, label: "Creating V-Editor task…", status: "queued" });
 
-          // Submit only this image. Never build a 50-URL request or wait for all uploads first.
           const create = await fetch("/api/generate-batch", {
             method: "POST",
-            headers: { "Content-Type": "application/json" },
+            headers: {
+              "Content-Type": "application/json",
+              "X-Pixora-Queue-Item": "1",
+            },
             body: JSON.stringify({ imageUrls: [uploadedUrl], prompt, aspectRatio: batchRatio }),
           });
           const created = await create.json() as { tasks?: Array<{ index: number; taskId?: string; error?: string }>; error?: string };
@@ -542,7 +680,7 @@ export default function Editor() {
           if (!create.ok && !task?.taskId) throw new Error(created.error || task?.error || "Could not start generation");
           if (!task?.taskId) throw new Error(task?.error || created.error || "Could not start this image.");
 
-          updateBatchItem(id, { taskId: task.taskId, progress: 60, label: "Task accepted", status: "queued" });
+          updateBatchItem(id, { taskId: task.taskId, progress: 60, label: "V-Editor processing", status: "processing" });
 
           const output = await pollTask(task.taskId, (status) => updateBatchItem(id, {
             progress: taskPercent(status),
@@ -550,7 +688,6 @@ export default function Editor() {
             status: "processing",
           }));
 
-          // Replace the source thumbnail with the finished image immediately.
           updateBatchItem(id, {
             result: output,
             preview: output,
@@ -560,10 +697,17 @@ export default function Editor() {
           });
           addHistory(output, batchPrompt.trim(), false);
         } catch (error) {
+          if (batchStopRequestedRef.current) {
+            const current = batchItemsRef.current.find((entry) => entry.id === id);
+            if (current && current.status !== "done" && current.status !== "processing") {
+              updateBatchItem(id, { label: "Stopped · not processed", status: "stopped" });
+              return;
+            }
+          }
           const detail = error instanceof Error ? error.message : "Generation failed";
           updateBatchItem(id, { progress: 100, label: detail, status: "failed", error: detail });
         }
-      }
+      });
 
       if (batchStopRequestedRef.current) {
         setBatchItems((current) => {
@@ -792,7 +936,7 @@ export default function Editor() {
             <input ref={singleInputRef} disabled={isProcessing} type="file" accept="image/png,image/jpeg,image/webp" hidden onChange={(e: ChangeEvent<HTMLInputElement>) => setSingleFileSafe(e.target.files?.[0])} />
             {singlePreview ? <><img src={singlePreview} alt="Selected preview" />{!isProcessing && <button type="button" className="replace" onClick={(e) => { e.stopPropagation(); singleInputRef.current?.click(); }}>Replace image</button>}</> : <UploadEmpty title="Drop an image here" subtitle="or click to browse · PNG, JPG or WEBP · max 12 MB" />}
           </div>
-          <div className="controls"><div className="controlHeading"><span className="step">02</span><h2>Describe your edit</h2></div><label className="promptLabel" htmlFor="single-prompt">YOUR PROMPT</label><textarea id="single-prompt" value={singlePrompt} onChange={(e) => setSinglePrompt(e.target.value)} placeholder="Make the scene look like golden hour, keep the person unchanged…" maxLength={700} /><div className="promptMeta"><button type="button" onClick={() => setSinglePrompt("Replace the background with a warm, cinematic sunset while keeping the subject unchanged.")}>✦ Try an example</button><span>{singlePrompt.length}/700</span></div><RatioPicker value={singleRatio} onChange={setSingleRatio} /><PreserveControls preserveFace={preserveFace} preservePose={preservePose} onFace={setPreserveFace} onPose={setPreservePose} /><ProgressBar progress={singleProgress} /><button type="button" className="generate" disabled={!singleFile || !singlePrompt.trim() || singleBusy} onClick={generateSingle}>{singleBusy ? <><span className="spinner" /> Working…</> : <>Generate edit <span>→</span></>}</button>{singleMessage && <p className="error">{singleMessage}</p>}<p className="fineprint">Same Face and Same Pose are prompt-level preservation locks; exact model output can still vary.</p></div>
+          <div className="controls"><div className="controlHeading"><span className="step">02</span><h2>Describe your edit</h2></div><label className="promptLabel" htmlFor="single-prompt">YOUR PROMPT</label><textarea id="single-prompt" value={singlePrompt} onChange={(e) => setSinglePrompt(e.target.value)} placeholder="Make the scene look like golden hour, keep the person unchanged…" maxLength={700} /><div className="promptMeta"><button type="button" onClick={() => setSinglePrompt("Replace the background with a warm, cinematic sunset while keeping the subject unchanged.")}>✦ Try an example</button><span>{singlePrompt.length}/700</span></div><RatioPicker value={singleRatio} onChange={setSingleRatio} /><PreserveControls preserveFace={preserveFace} preservePose={preservePose} onFace={setPreserveFace} onPose={setPreservePose} /><ProgressBar progress={singleProgress} /><div className="runActions"><button type="button" className="generate" disabled={!singleFile || !singlePrompt.trim() || singleBusy} onClick={generateSingle}>{singleBusy ? <><span className="spinner" /> Working…</> : <>Generate edit <span>→</span></>}</button>{singleBusy && <button type="button" className="stopAction" disabled={singleStopRequested} onClick={requestSingleStop}>{singleStopRequested ? "Stopping…" : "■ Stop"}</button>}</div>{singleMessage && <p className="error">{singleMessage}</p>}<p className="fineprint">Same Face and Same Pose are prompt-level preservation locks; exact model output can still vary.</p></div>
         </div>
       </>}
 
@@ -804,7 +948,7 @@ export default function Editor() {
             <input ref={batchInputRef} disabled={isProcessing} type="file" multiple accept="image/png,image/jpeg,image/webp" hidden onChange={(e: ChangeEvent<HTMLInputElement>) => { if (e.target.files) addBatchFiles(e.target.files); e.target.value = ""; }} />
             {batchItems.length === 0 ? <div className="dropzone batchDropzone" onClick={() => batchInputRef.current?.click()} onDrop={batchDrop} onDragOver={(e) => e.preventDefault()} role="button" tabIndex={0}><UploadEmpty title={`Drop up to ${MAX_BATCH} images`} subtitle="One shared prompt will be applied to every image" button="Choose images" /></div> : <div className="batchGrid" onDrop={batchDrop} onDragOver={(e) => e.preventDefault()}>{batchItems.map((item, index) => <article key={item.id} className={`batchCard ${item.status}`}><div className="batchThumb"><img src={item.result || item.preview} alt={item.result ? `Generated result ${index + 1}` : `Batch source ${index + 1}`} loading="lazy" decoding="async" />{!batchBusy && <button type="button" onClick={() => removeBatchItem(item.id)} aria-label={`Remove image ${index + 1}`}>×</button>}</div><div className="batchCardMeta"><span>{index + 1}</span><div><strong>{item.status === "done" ? "Done" : item.status === "failed" ? "Failed" : item.status === "stopped" ? "Stopped" : item.label}</strong><div className="miniProgress"><i style={{ width: `${item.progress}%` }} /></div></div><b>{Math.round(item.progress)}%</b></div>{item.result && <div className="batchResultActions"><button type="button" onClick={() => downloadOne(item.result!, index + 1)}>↓ Download</button><a href={item.result} target="_blank" rel="noopener noreferrer">Open ↗</a></div>}</article>)}</div>}
           </div>
-          <div className="controls"><div className="controlHeading"><span className="step">02</span><h2>Shared batch prompt</h2></div><label className="promptLabel" htmlFor="batch-prompt">PROMPT FOR ALL IMAGES</label><textarea id="batch-prompt" value={batchPrompt} onChange={(e) => setBatchPrompt(e.target.value)} placeholder="Apply the same edit to every selected image…" maxLength={700} /><div className="promptMeta"><button type="button" onClick={() => setBatchPrompt("Give every image a clean cinematic color grade while preserving the subject and composition.")}>✦ Try an example</button><span>{batchPrompt.length}/700</span></div><RatioPicker value={batchRatio} onChange={setBatchRatio} /><PreserveControls preserveFace={preserveFace} preservePose={preservePose} onFace={setPreserveFace} onPose={setPreservePose} /><ProgressBar progress={batchProgress} /><div className="batchRunActions"><button type="button" className="generate" disabled={!batchItems.length || !batchPrompt.trim() || batchBusy} onClick={generateBatch}>{batchBusy ? <><span className="spinner" /> Processing {batchDone}/{batchItems.length}</> : <>Generate {batchItems.length || ""} image{batchItems.length === 1 ? "" : "s"} <span>→</span></>}</button>{batchBusy && <button type="button" className="stopBatch" disabled={batchStopRequested} onClick={requestBatchStop}>{batchStopRequested ? "Stopping…" : "■ Stop"}</button>}</div>{batchMessage && <p className="error">{batchMessage}</p>}<p className="fineprint">Each image is sent to V-Editor as its own independent request.</p></div>
+          <div className="controls"><div className="controlHeading"><span className="step">02</span><h2>Shared batch prompt</h2></div><label className="promptLabel" htmlFor="batch-prompt">PROMPT FOR ALL IMAGES</label><textarea id="batch-prompt" value={batchPrompt} onChange={(e) => setBatchPrompt(e.target.value)} placeholder="Apply the same edit to every selected image…" maxLength={700} /><div className="promptMeta"><button type="button" onClick={() => setBatchPrompt("Give every image a clean cinematic color grade while preserving the subject and composition.")}>✦ Try an example</button><span>{batchPrompt.length}/700</span></div><RatioPicker value={batchRatio} onChange={setBatchRatio} /><PreserveControls preserveFace={preserveFace} preservePose={preservePose} onFace={setPreserveFace} onPose={setPreservePose} /><ProgressBar progress={batchProgress} /><div className="runActions"><button type="button" className="generate" disabled={!batchItems.length || !batchPrompt.trim() || batchBusy} onClick={generateBatch}>{batchBusy ? <><span className="spinner" /> Processing {batchDone}/{batchItems.length}</> : <>Generate {batchItems.length || ""} image{batchItems.length === 1 ? "" : "s"} <span>→</span></>}</button>{batchBusy && <button type="button" className="stopAction" disabled={batchStopRequested} onClick={requestBatchStop}>{batchStopRequested ? "Stopping…" : "■ Stop"}</button>}</div>{batchMessage && <p className="error">{batchMessage}</p>}<p className="fineprint">Memory-safe queue: uploads are controlled and only a few V-Editor jobs run at once for faster batch completion.</p></div>
         </div>
       </>}
 
@@ -815,7 +959,7 @@ export default function Editor() {
             <div><span className="uploadCaption">MAIN IMAGE</span><div className={`dropzone referenceDropzone ${referenceMainPreview ? "hasImage" : ""}`} onClick={() => referenceMainRef.current?.click()} onDrop={(e) => referenceDrop("main", e)} onDragOver={(e) => e.preventDefault()} role="button" tabIndex={0}><input ref={referenceMainRef} type="file" accept="image/png,image/jpeg,image/webp" hidden onChange={(e: ChangeEvent<HTMLInputElement>) => setReferenceFile("main", e.target.files?.[0])} />{referenceMainPreview ? <><img src={referenceMainPreview} alt="Main input" /><button type="button" className="replace" onClick={(e) => { e.stopPropagation(); referenceMainRef.current?.click(); }}>Replace</button></> : <UploadEmpty title="Main image" subtitle="The image you want to edit" />}</div></div>
             <div><span className="uploadCaption">REFERENCE IMAGE</span><div className={`dropzone referenceDropzone ${referencePreview ? "hasImage" : ""}`} onClick={() => referenceStyleRef.current?.click()} onDrop={(e) => referenceDrop("reference", e)} onDragOver={(e) => e.preventDefault()} role="button" tabIndex={0}><input ref={referenceStyleRef} type="file" accept="image/png,image/jpeg,image/webp" hidden onChange={(e: ChangeEvent<HTMLInputElement>) => setReferenceFile("reference", e.target.files?.[0])} />{referencePreview ? <><img src={referencePreview} alt="Reference input" /><button type="button" className="replace" onClick={(e) => { e.stopPropagation(); referenceStyleRef.current?.click(); }}>Replace</button></> : <UploadEmpty title="Reference image" subtitle="Style, pose, look, or visual guide" />}</div></div>
           </div>
-          <div className="controls"><div className="controlHeading"><span className="step">02</span><h2>Tell V-Editor what to borrow</h2></div><label className="promptLabel" htmlFor="reference-prompt">YOUR PROMPT</label><textarea id="reference-prompt" value={referencePrompt} onChange={(e) => setReferencePrompt(e.target.value)} placeholder="Use the reference image's lighting and color style while keeping the person from the main image…" maxLength={700} /><div className="promptMeta"><button type="button" onClick={() => setReferencePrompt("Use the reference image's visual style and lighting while preserving the main subject's identity and composition.")}>✦ Try an example</button><span>{referencePrompt.length}/700</span></div><RatioPicker value={referenceRatio} onChange={setReferenceRatio} /><PreserveControls preserveFace={preserveFace} preservePose={preservePose} onFace={setPreserveFace} onPose={setPreservePose} /><ProgressBar progress={referenceProgress} /><button type="button" className="generate" disabled={!referenceMain || !referenceImage || !referencePrompt.trim() || referenceBusy} onClick={generateReference}>{referenceBusy ? <><span className="spinner" /> Working…</> : <>Generate reference edit <span>→</span></>}</button>{referenceMessage && <p className="error">{referenceMessage}</p>}<p className="fineprint">With a lock enabled, the main image stays authoritative for identity/pose; reference remains guidance.</p></div>
+          <div className="controls"><div className="controlHeading"><span className="step">02</span><h2>Tell V-Editor what to borrow</h2></div><label className="promptLabel" htmlFor="reference-prompt">YOUR PROMPT</label><textarea id="reference-prompt" value={referencePrompt} onChange={(e) => setReferencePrompt(e.target.value)} placeholder="Use the reference image's lighting and color style while keeping the person from the main image…" maxLength={700} /><div className="promptMeta"><button type="button" onClick={() => setReferencePrompt("Use the reference image's visual style and lighting while preserving the main subject's identity and composition.")}>✦ Try an example</button><span>{referencePrompt.length}/700</span></div><RatioPicker value={referenceRatio} onChange={setReferenceRatio} /><PreserveControls preserveFace={preserveFace} preservePose={preservePose} onFace={setPreserveFace} onPose={setPreservePose} /><ProgressBar progress={referenceProgress} /><div className="runActions"><button type="button" className="generate" disabled={!referenceMain || !referenceImage || !referencePrompt.trim() || referenceBusy} onClick={generateReference}>{referenceBusy ? <><span className="spinner" /> Working…</> : <>Generate reference edit <span>→</span></>}</button>{referenceBusy && <button type="button" className="stopAction" disabled={referenceStopRequested} onClick={requestReferenceStop}>{referenceStopRequested ? "Stopping…" : "■ Stop"}</button>}</div>{referenceMessage && <p className="error">{referenceMessage}</p>}<p className="fineprint">With a lock enabled, the main image stays authoritative for identity/pose; reference remains guidance.</p></div>
         </div>
       </>}
 
