@@ -87,6 +87,20 @@ function applyPreservation(prompt: string, preserveFace: boolean, preservePose: 
   return constraints.length ? `${prompt.trim()}\n\nImportant preservation constraints: ${constraints.join(" ")}` : prompt.trim();
 }
 
+function displayImageUrl(url: string, width = 720) {
+  if (!url) return url;
+  try {
+    const parsed = new URL(url);
+    if (!parsed.hostname.endsWith("imagekit.io")) return url;
+    const current = parsed.searchParams.get("tr");
+    const resize = `w-${Math.max(120, Math.min(1200, Math.round(width)))},q-72`;
+    parsed.searchParams.set("tr", current ? `${current},${resize}` : resize);
+    return parsed.toString();
+  } catch {
+    return url;
+  }
+}
+
 export default function Editor() {
   const singleInputRef = useRef<HTMLInputElement>(null);
   const batchInputRef = useRef<HTMLInputElement>(null);
@@ -956,7 +970,7 @@ export default function Editor() {
           <div className="batchPane">
             <div className="batchToolbar"><strong>Selected images</strong><div>{batchItems.length > 0 && <button type="button" onClick={clearBatch} disabled={isProcessing}>Clear all</button>}<button type="button" onClick={() => batchInputRef.current?.click()} disabled={isProcessing || batchItems.length >= MAX_BATCH}>+ Add images</button></div></div>
             <input ref={batchInputRef} disabled={isProcessing} type="file" multiple accept="image/png,image/jpeg,image/webp" hidden onChange={(e: ChangeEvent<HTMLInputElement>) => { if (e.target.files) addBatchFiles(e.target.files); e.target.value = ""; }} />
-            {batchItems.length === 0 ? <div className="dropzone batchDropzone" onClick={() => batchInputRef.current?.click()} onDrop={batchDrop} onDragOver={(e) => e.preventDefault()} role="button" tabIndex={0}><UploadEmpty title={`Drop up to ${MAX_BATCH} images`} subtitle="One shared prompt will be applied to every image" button="Choose images" /></div> : <div className="batchGrid" onDrop={batchDrop} onDragOver={(e) => e.preventDefault()}>{batchItems.map((item, index) => <article key={item.id} className={`batchCard ${item.status}`}><div className="batchThumb"><img src={item.result || item.preview} alt={item.result ? `Generated result ${index + 1}` : `Batch source ${index + 1}`} loading="lazy" decoding="async" />{!batchBusy && <button type="button" onClick={() => removeBatchItem(item.id)} aria-label={`Remove image ${index + 1}`}>×</button>}</div><div className="batchCardMeta"><span>{index + 1}</span><div><strong>{item.status === "done" ? "Done" : item.status === "failed" ? "Failed" : item.status === "stopped" ? "Stopped" : item.label}</strong><div className="miniProgress"><i style={{ width: `${item.progress}%` }} /></div></div><b>{Math.round(item.progress)}%</b></div>{item.result && <div className="batchResultActions"><button type="button" onClick={() => downloadOne(item.result!, index + 1)}>↓ Download</button><a href={item.result} target="_blank" rel="noopener noreferrer">Open ↗</a></div>}</article>)}</div>}
+            {batchItems.length === 0 ? <div className="dropzone batchDropzone" onClick={() => batchInputRef.current?.click()} onDrop={batchDrop} onDragOver={(e) => e.preventDefault()} role="button" tabIndex={0}><UploadEmpty title={`Drop up to ${MAX_BATCH} images`} subtitle="One shared prompt will be applied to every image" button="Choose images" /></div> : <div className="batchGrid" onDrop={batchDrop} onDragOver={(e) => e.preventDefault()}>{batchItems.map((item, index) => <article key={item.id} className={`batchCard ${item.status}`}><div className="batchThumb"><img src={displayImageUrl(item.result || item.preview, 420)} alt={item.result ? `Generated result ${index + 1}` : `Batch source ${index + 1}`} loading="lazy" decoding="async" />{!batchBusy && <button type="button" onClick={() => removeBatchItem(item.id)} aria-label={`Remove image ${index + 1}`}>×</button>}</div><div className="batchCardMeta"><span>{index + 1}</span><div><strong>{item.status === "done" ? "Done" : item.status === "failed" ? "Failed" : item.status === "stopped" ? "Stopped" : item.label}</strong><div className="miniProgress"><i style={{ width: `${item.progress}%` }} /></div></div><b>{Math.round(item.progress)}%</b></div>{item.result && <div className="batchResultActions"><button type="button" onClick={() => downloadOne(item.result!, index + 1)}>↓ Download</button><a href={item.result} target="_blank" rel="noopener noreferrer">Open ↗</a></div>}</article>)}</div>}
           </div>
           <div className="controls"><div className="controlHeading"><span className="step">02</span><h2>Shared batch prompt</h2></div><label className="promptLabel" htmlFor="batch-prompt">PROMPT FOR ALL IMAGES</label><textarea id="batch-prompt" value={batchPrompt} onChange={(e) => setBatchPrompt(e.target.value)} placeholder="Apply the same edit to every selected image…" maxLength={700} /><div className="promptMeta"><button type="button" onClick={() => setBatchPrompt("Give every image a clean cinematic color grade while preserving the subject and composition.")}>✦ Try an example</button><span>{batchPrompt.length}/700</span></div><RatioPicker value={batchRatio} onChange={setBatchRatio} /><PreserveControls preserveFace={preserveFace} preservePose={preservePose} onFace={setPreserveFace} onPose={setPreservePose} /><ProgressBar progress={batchProgress} /><div className="runActions"><button type="button" className="generate" disabled={!batchItems.length || !batchPrompt.trim() || batchBusy} onClick={generateBatch}>{batchBusy ? <><span className="spinner" /> Processing {batchDone}/{batchItems.length}</> : <>Generate {batchItems.length || ""} image{batchItems.length === 1 ? "" : "s"} <span>→</span></>}</button>{batchBusy && <button type="button" className="stopAction" disabled={batchStopRequested} onClick={requestBatchStop}>{batchStopRequested ? "Stopping…" : "■ Stop"}</button>}</div>{batchMessage && <p className="error">{batchMessage}</p>}<p className="fineprint">Memory-safe queue: uploads are controlled and only a few V-Editor jobs run at once for faster batch completion.</p></div>
         </div>
@@ -982,7 +996,7 @@ export default function Editor() {
           {batchResults.length ? <>
             <div className="batchOutputHead"><div><strong>{batchResults.length} result{batchResults.length === 1 ? "" : "s"} ready</strong><small>{batchFailed ? `${batchFailed} failed` : "Batch completed"}</small></div><div><button type="button" disabled={batchDownloading} onClick={() => void downloadBatch("zip")}>{batchDownloading ? "Preparing…" : "↓ Download ZIP"}</button><button type="button" disabled={batchDownloading} onClick={() => void downloadBatch("separate")}>Separate files</button></div></div>
             <div className="batchOutputGrid">{batchItems.filter((item) => item.result).map((item, index) => <article key={item.id}>
-              <div className={`downloadVisual ${downloadedUrls.includes(item.result!) ? "downloaded" : ""}`} onClick={() => openViewer(batchResults, index)} role="button" tabIndex={0}><img src={item.result} alt={`Batch result ${index + 1}`} /><span className="downloadCheck">✓<small>Downloaded</small></span></div>
+              <div className={`downloadVisual ${downloadedUrls.includes(item.result!) ? "downloaded" : ""}`} onClick={() => openViewer(batchResults, index)} role="button" tabIndex={0}><img src={displayImageUrl(item.result!, 640)} alt={`Batch result ${index + 1}`} loading="lazy" decoding="async" /><span className="downloadCheck">✓<small>Downloaded</small></span></div>
               <div><button type="button" onClick={() => void downloadOne(item.result!, index + 1)}>↓ Download</button><a href={item.result} target="_blank" rel="noopener noreferrer">Open full size ↗</a></div>
             </article>)}</div>
           </> : <div className="emptyResult"><span>✦</span><h3>Your batch results will appear here</h3><p>Add up to {MAX_BATCH} images, use one prompt, and generate them together.</p></div>}
@@ -991,14 +1005,14 @@ export default function Editor() {
             <div className={`downloadVisual ${downloadedUrls.includes(activeResult) ? "downloaded" : ""}`} onClick={() => {
               const index = history.findIndex((item) => item.url === activeResult);
               openViewer(index >= 0 ? history.map((item) => item.url) : [activeResult], index >= 0 ? index : 0);
-            }} role="button" tabIndex={0}><img src={activeResult} alt="AI generated edit" /><span className="downloadCheck">✓<small>Downloaded</small></span></div>
+            }} role="button" tabIndex={0}><img src={displayImageUrl(activeResult, 900)} alt="AI generated edit" decoding="async" /><span className="downloadCheck">✓<small>Downloaded</small></span></div>
             <div className="resultActions"><button type="button" onClick={() => void downloadOne(activeResult)}>↓ Download</button><a href={activeResult} target="_blank" rel="noopener noreferrer">Open full size ↗</a></div>
           </div> : <div className="emptyResult"><span>✦</span><h3>Your creation will appear here</h3><p>{mode === "reference" ? "Add a main image, reference image, and prompt." : "Upload an image, write a prompt, and let Pixora do the rest."}</p></div>}
         </div> : <div className={`historyGrid ${selecting ? "selecting" : ""}`}>
           {history.length ? history.map((item, index) => <article key={item.createdAt} className={selected.includes(item.url) ? "selected" : ""} onClick={() => selecting ? toggleSelection(item.url) : openViewer(history.map((entry) => entry.url), index)} role="button" tabIndex={0} onKeyDown={(event) => event.key === "Enter" && (selecting ? toggleSelection(item.url) : openViewer(history.map((entry) => entry.url), index))}>
             {selecting && <span className="check">{selected.includes(item.url) ? "✓" : ""}</span>}
             {!selecting && <button type="button" className="historyDelete" disabled={isProcessing} aria-label="Remove image from history" onClick={(event) => { event.stopPropagation(); removeHistoryItem(item, index); }}>×</button>}
-            <div className={`downloadVisual ${downloadedUrls.includes(item.url) ? "downloaded" : ""}`}><img src={item.url} alt={item.prompt} /><span className="downloadCheck">✓<small>Downloaded</small></span></div>
+            <div className={`downloadVisual ${downloadedUrls.includes(item.url) ? "downloaded" : ""}`}><img src={displayImageUrl(item.url, 520)} alt={item.prompt} loading="lazy" decoding="async" /><span className="downloadCheck">✓<small>Downloaded</small></span></div>
             <div className="historyCaption"><span>{item.prompt}</span>{!selecting && <button type="button" aria-label="Download image" onClick={(event) => { event.stopPropagation(); void downloadOne(item.url, index + 1); }}>↓</button>}</div>
           </article>) : <div className="emptyResult"><h3>No edits yet</h3><p>Edits stay on this device for 24 hours.</p></div>}
         </div>}
@@ -1020,7 +1034,7 @@ export default function Editor() {
       {viewerUrls.length > 1 && <button type="button" className="viewerNext" onClick={(event) => { event.stopPropagation(); moveViewer(1); }} aria-label="Next image">›</button>}
     </div>}
 
-    {downloadNoticeUrl && <div className="downloadNotice" role="status"><img src={downloadNoticeUrl} alt="" /><div><b>✓</b><span>Downloaded</span></div></div>}
+    {downloadNoticeUrl && <div className="downloadNotice" role="status"><img src={displayImageUrl(downloadNoticeUrl, 160)} alt="" /><div><b>✓</b><span>Downloaded</span></div></div>}
 
     {pendingUndo && <div className="undoToast" role="status" aria-live="polite" onTouchStart={(event) => { undoSwipeStart.current = event.touches[0].clientX; }} onTouchEnd={(event) => {
       if (undoSwipeStart.current === null) return;
