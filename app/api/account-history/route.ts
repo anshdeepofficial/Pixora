@@ -33,9 +33,9 @@ export async function POST(request: Request) {
   const session = await sessionFromRequest();
   if (!session) return Response.json({ error: "Sign in to sync history." }, { status: 401 });
 
-  let body: { url?: string; prompt?: string; createdAt?: string };
+  let body: { url?: string; previewUrl?: string; prompt?: string; createdAt?: string };
   try {
-    body = await request.json() as { url?: string; prompt?: string; createdAt?: string };
+    body = await request.json() as { url?: string; previewUrl?: string; prompt?: string; createdAt?: string };
   } catch {
     return Response.json({ error: "Invalid history item." }, { status: 400 });
   }
@@ -43,6 +43,7 @@ export async function POST(request: Request) {
   try {
     const item = await saveAccountHistoryItem(session.id, {
       url: String(body.url || ""),
+      previewUrl: body.previewUrl ? String(body.previewUrl) : undefined,
       prompt: String(body.prompt || ""),
       createdAt: String(body.createdAt || new Date().toISOString()),
     });
