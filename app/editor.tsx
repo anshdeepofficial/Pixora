@@ -7,7 +7,8 @@ const ratios = ["default", "1:1", "3:2", "2:3", "9:16", "16:9", "3:4", "4:3"];
 const MAX_BATCH = 50;
 const MAX_FILE_BYTES = 12 * 1024 * 1024;
 const BATCH_PIPELINE_CONCURRENCY = 4;
-const APP_VERSION = "1.2.1";
+const HISTORY_TTL_MS = 60 * 60 * 1000;
+const APP_VERSION = "1.3.0";
 const APP_VERSION_KEY = "pixora-app-version";
 
 type Mode = "single" | "batch" | "reference";
@@ -179,6 +180,12 @@ export default function Editor() {
   const [viewerIndex, setViewerIndex] = useState(0);
   const [pendingUndo, setPendingUndo] = useState<{ item: HistoryItem; index: number } | null>(null);
   const [versionNotice, setVersionNotice] = useState(false);
+  const [accountEmail, setAccountEmail] = useState("");
+  const [authOpen, setAuthOpen] = useState(false);
+  const [authEmail, setAuthEmail] = useState("");
+  const [authPassword, setAuthPassword] = useState("");
+  const [authBusy, setAuthBusy] = useState(false);
+  const [authMessage, setAuthMessage] = useState("");
   const swipeStart = useRef<number | null>(null);
   const undoSwipeStart = useRef<number | null>(null);
   const undoTimerRef = useRef<number | null>(null);
@@ -199,44 +206,38 @@ export default function Editor() {
     const prune = () => {
       const saved = localStorage.getItem("pixora-history");
       const hiddenSaved = localStorage.getItem("pixora-history-hidden");
-      const cutoff = Date.now() - 24 * 60 * 60 * 1000;
+      const cutoff = Date.now() - HISTORY_TTL_MS;
       let parsed: HistoryItem[] = [];
       let hidden: string[] = [];
       try { parsed = saved ? JSON.parse(saved) as HistoryItem[] : []; } catch { parsed = []; }
       try { hidden = hiddenSaved ? JSON.parse(hiddenSaved) as string[] : []; } catch { hidden = []; }
       const hiddenUrls = new Set(hidden);
-      const fresh = parsed.filter((item) => new Date(item.createdAt).getTime() > cutoff && !hiddenUrls.has(item.url));
+      const fresh = parsed
+        .filter((item) => new Date(item.createdAt).getTime() > cutoff && !hiddenUrls.has(item.url))
+        .sort((left, right) => new Date(right.createdAt).getTime() - new Date(left.createdAt).getTime());
       setHistory(fresh);
       localStorage.setItem("pixora-history", JSON.stringify(fresh));
     };
+
     prune();
     const timer = window.setInterval(prune, 60_000);
-    fetch("/api/stats", { cache: "no-store" }).then((response) => response.ok ? response.json() : Promise.reject()).then((data: { totalGenerated?: number }) => {
-      if (typeof data.totalGenerated === "number") setTotalGenerated(data.totalGenerated);
-    }).catch(() => undefined);
-    fetch("/api/recovery-history", { cache: "no-store" })
+
+    fetch("/api/stats", { cache: "no-store" })
       .then((response) => response.ok ? response.json() : Promise.reject())
-      .then((data: { history?: HistoryItem[]; historyVersion?: string }) => {
-        if (!Array.isArray(data.history)) return;
-        const resetHistory = Boolean(data.historyVersion && localStorage.getItem("pixora-history-version") !== data.historyVersion);
-        if (data.historyVersion) localStorage.setItem("pixora-history-version", data.historyVersion);
-        if (resetHistory) {
-          localStorage.removeItem("pixora-history");
-          localStorage.removeItem("pixora-history-hidden");
-          setSelected([]);
-        }
-        setHistory((current) => {
-          let hidden: string[] = [];
-          try { hidden = JSON.parse(localStorage.getItem("pixora-history-hidden") || "[]") as string[]; } catch { hidden = []; }
-          const hiddenUrls = new Set(hidden);
-          const combined = [...data.history!, ...(resetHistory ? [] : current)].filter((item) => !hiddenUrls.has(item.url));
-          const unique = Array.from(new Map(combined.map((item) => [item.url, item])).values())
-            .sort((left, right) => new Date(right.createdAt).getTime() - new Date(left.createdAt).getTime());
-          localStorage.setItem("pixora-history", JSON.stringify(unique));
-          return unique;
-        });
+      .then((data: { totalGenerated?: number }) => {
+        if (typeof data.totalGenerated === "number") setTotalGenerated(data.totalGenerated);
       })
       .catch(() => undefined);
+
+    fetch("/api/auth", { cache: "no-store" })
+      .then((response) => response.ok ? response.json() : Promise.reject())
+      .then((data: { authenticated?: boolean; account?: { email?: string } | null }) => {
+        const email = data.authenticated ? String(data.account?.email || "") : "";
+        setAccountEmail(email);
+        if (email) void syncAndLoadAccountHistory();
+      })
+      .catch(() => undefined);
+
     return () => {
       window.clearInterval(timer);
       if (undoTimerRef.current !== null) window.clearTimeout(undoTimerRef.current);
@@ -267,13 +268,114 @@ export default function Editor() {
     batchItemsRef.current = batchItems;
   }, [batchItems]);
 
+  function freshHistoryItems(items: HistoryItem[]) {
+    const cutoff = Date.now() - HISTORY_TTL_MS;
+    return Array.from(
+      new Map(
+        items
+          .filter((item) => item?.url && new Date(item.createdAt).getTime() > cutoff)
+          .map((item) => [item.url, item]),
+      ).values(),
+    ).sort((left, right) => new Date(right.createdAt).getTime() - new Date(left.createdAt).getTime());
+  }
+
+  function localHistoryItems() {
+    try {
+      return freshHistoryItems(JSON.parse(localStorage.getItem("pixora-history") || "[]") as HistoryItem[]);
+    } catch {
+      return [];
+    }
+  }
+
+  function storeHistory(items: HistoryItem[]) {
+    const fresh = freshHistoryItems(items);
+    setHistory(fresh);
+    localStorage.setItem("pixora-history", JSON.stringify(fresh));
+    return fresh;
+  }
+
+  async function saveSyncedHistoryItem(item: HistoryItem) {
+    const response = await fetch("/api/account-history", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(item),
+    });
+    if (response.status === 401) setAccountEmail("");
+    return response.ok;
+  }
+
+  async function syncAndLoadAccountHistory() {
+    const local = localHistoryItems();
+
+    if (local.length) {
+      await Promise.allSettled(local.map((item) => saveSyncedHistoryItem(item)));
+    }
+
+    const response = await fetch("/api/account-history", { cache: "no-store" });
+    if (!response.ok) {
+      if (response.status === 401) setAccountEmail("");
+      return;
+    }
+
+    const data = await response.json() as { history?: HistoryItem[] };
+    const remote = Array.isArray(data.history) ? data.history : [];
+    localStorage.removeItem("pixora-history-hidden");
+    setSelected([]);
+    storeHistory([...remote, ...local]);
+  }
+
+  async function submitAccount() {
+    if (authBusy) return;
+    setAuthBusy(true);
+    setAuthMessage("");
+    try {
+      const response = await fetch("/api/auth", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ email: authEmail, password: authPassword }),
+      });
+      const data = await response.json() as { account?: { email?: string }; created?: boolean; error?: string };
+      if (!response.ok || !data.account?.email) throw new Error(data.error || "Could not sign in.");
+
+      setAccountEmail(data.account.email);
+      setAuthEmail(data.account.email);
+      setAuthPassword("");
+      await syncAndLoadAccountHistory();
+      setAuthMessage(data.created ? "Account created and history synced." : "Signed in and history synced.");
+      window.setTimeout(() => {
+        setAuthOpen(false);
+        setAuthMessage("");
+      }, 700);
+    } catch (error) {
+      setAuthMessage(error instanceof Error ? error.message : "Could not sign in.");
+    } finally {
+      setAuthBusy(false);
+    }
+  }
+
+  async function signOutAccount() {
+    if (isProcessing) return;
+    await fetch("/api/auth", { method: "DELETE" }).catch(() => undefined);
+    setAccountEmail("");
+    setAuthOpen(false);
+    setAuthEmail("");
+    setAuthPassword("");
+    setAuthMessage("");
+    localStorage.removeItem("pixora-history");
+    localStorage.removeItem("pixora-history-hidden");
+    setHistory([]);
+    setSelected([]);
+    setOutputTab("result");
+  }
+
   function addHistory(url: string, prompt: string, incrementGenerationCount = true) {
-    const item = { url, prompt, createdAt: new Date().toISOString() };
+    const item: HistoryItem = { url, prompt, createdAt: new Date().toISOString() };
     setHistory((current) => {
-      const next = [item, ...current];
+      const next = freshHistoryItems([item, ...current]);
       localStorage.setItem("pixora-history", JSON.stringify(next));
       return next;
     });
+    if (accountEmail) void saveSyncedHistoryItem(item);
     if (incrementGenerationCount) {
       setTotalGenerated((current) => current === null ? current : current + 1);
     }
@@ -879,7 +981,13 @@ export default function Editor() {
     const hidden = readHiddenHistory();
     localStorage.setItem("pixora-history-hidden", JSON.stringify(Array.from(new Set([...hidden, ...history.map((item) => item.url)]))));
     dismissUndo();
-    localStorage.removeItem("pixora-history"); setHistory([]); setSelected([]); setSelecting(false); setDownloadMenu(false); setOutputTab("history");
+    localStorage.removeItem("pixora-history");
+    setHistory([]);
+    setSelected([]);
+    setSelecting(false);
+    setDownloadMenu(false);
+    setOutputTab("history");
+    if (accountEmail) void fetch("/api/account-history", { method: "DELETE" });
   }
 
   function readHiddenHistory() {
@@ -901,6 +1009,7 @@ export default function Editor() {
       return next;
     });
     localStorage.setItem("pixora-history-hidden", JSON.stringify(Array.from(new Set([...readHiddenHistory(), item.url]))));
+    if (accountEmail) void fetch(`/api/account-history?url=${encodeURIComponent(item.url)}`, { method: "DELETE" });
     setSelected((current) => current.filter((url) => url !== item.url));
     setPendingUndo({ item, index });
     undoTimerRef.current = window.setTimeout(() => {
@@ -913,6 +1022,7 @@ export default function Editor() {
     if (!pendingUndo) return;
     const { item, index } = pendingUndo;
     localStorage.setItem("pixora-history-hidden", JSON.stringify(readHiddenHistory().filter((url) => url !== item.url)));
+    if (accountEmail) void saveSyncedHistoryItem(item);
     setHistory((current) => {
       const withoutItem = current.filter((entry) => entry.url !== item.url);
       const next = [...withoutItem];
@@ -954,7 +1064,7 @@ export default function Editor() {
   const activeResult = mode === "single" ? singleResult : mode === "reference" ? referenceResult : "";
 
   return <main className="shell">
-    <nav className="nav"><a className="brand" href="#top" aria-label="Pixora home"><span className="brandMark">P</span><span>Pixora</span><small className="versionBadge">v{APP_VERSION}</small></a><div className="navActions"><span className="statusDot"><i /> V-Editor connected</span><a href="#how">How it works</a></div></nav>
+    <nav className="nav"><a className="brand" href="#top" aria-label="Pixora home"><span className="brandMark">P</span><span>Pixora</span><small className="versionBadge">v{APP_VERSION}</small></a><div className="navActions"><span className="statusDot"><i /> V-Editor connected</span><a href="#how">How it works</a>{accountEmail ? <div className="accountChip"><span>{accountEmail}</span><button type="button" disabled={isProcessing} onClick={() => void signOutAccount()}>Sign out</button></div> : <button type="button" className="accountLoginButton" onClick={() => { setAuthMessage(""); setAuthOpen(true); }}>Sign in</button>}</div></nav>
     {versionNotice && <div className="versionNotice" role="status"><b>✓ Updated to v{APP_VERSION}</b><span>The latest Pixora fixes are active.</span><button type="button" onClick={() => setVersionNotice(false)} aria-label="Close update notice">×</button></div>}
 
     <section className="hero" id="top"><div className="eyebrow"><span>✦</span> AI PHOTO EDITOR</div><h1>Edit any photo.<br /><em>Just describe it.</em></h1><p>Single edits, batch transformations, and reference-guided creations—powered by V-Editor.</p><div className="heroBadges"><div className="unlimited"><span>∞</span><div><strong>Unlimited trials</strong><small>Explore freely during early access</small></div></div><div className="generatedCount"><strong>{totalGenerated === null ? "—" : totalGenerated.toLocaleString()}</strong><span>images generated</span></div></div></section>
@@ -1001,7 +1111,7 @@ export default function Editor() {
       </>}
 
       <div className="output">
-        <div className="tabs"><div><button type="button" className={outputTab === "result" ? "active" : ""} onClick={() => setOutputTab("result")}>Result</button><button type="button" className={outputTab === "history" ? "active" : ""} onClick={() => setOutputTab("history")}>24h History <span>{history.length}</span></button></div>{history.length > 0 && <button type="button" className="clearHistory" disabled={isProcessing} onClick={clearHistory}>Clear history</button>}</div>
+        <div className="tabs"><div><button type="button" className={outputTab === "result" ? "active" : ""} onClick={() => setOutputTab("result")}>Result</button><button type="button" className={outputTab === "history" ? "active" : ""} onClick={() => setOutputTab("history")}>1h History <span>{history.length}</span></button></div>{history.length > 0 && <button type="button" className="clearHistory" disabled={isProcessing} onClick={clearHistory}>Clear history</button>}</div>
         <ProgressBar progress={downloadProgress} />
         {outputTab === "history" && history.length > 0 && <div className="downloadBar"><div><button type="button" className={`selectToggle ${selecting ? "active" : ""}`} onClick={() => { setSelecting(!selecting); setSelected([]); setDownloadMenu(false); }}>{selecting ? "Done" : "Select"}</button>{selecting && <button type="button" className="selectAll" onClick={() => setSelected(selected.length === history.length ? [] : history.map((item) => item.url))}>{selected.length === history.length ? "Clear all" : "Select all"}</button>}</div>{selecting && <div className="downloadWrap"><button type="button" className="downloadSelected" disabled={!selected.length || downloading} onClick={() => setDownloadMenu(!downloadMenu)}>{downloading ? "Preparing…" : `Download ${selected.length || ""}`} <span>⌄</span></button>{downloadMenu && <div className="downloadMenu"><button type="button" onClick={() => void downloadSelected("zip")}><b>ZIP archive</b><small>One file with all selected images</small></button><button type="button" onClick={() => void downloadSelected("separate")}><b>Separate files</b><small>Trigger each selected download separately</small></button></div>}</div>}</div>}
 
@@ -1027,10 +1137,26 @@ export default function Editor() {
             {!selecting && <button type="button" className="historyDelete" disabled={isProcessing} aria-label="Remove image from history" onClick={(event) => { event.stopPropagation(); removeHistoryItem(item, index); }}>×</button>}
             <div className={`downloadVisual ${downloadedUrls.includes(item.url) ? "downloaded" : ""}`}><img src={displayImageUrl(item.url, 720, 86)} alt={item.prompt} loading="lazy" decoding="async" /><span className="downloadCheck">✓<small>Downloaded</small></span></div>
             <div className="historyCaption"><span>{item.prompt}</span>{!selecting && <button type="button" aria-label="Download image" onClick={(event) => { event.stopPropagation(); void downloadOne(item.url, index + 1); }}>↓</button>}</div>
-          </article>) : <div className="emptyResult"><h3>No edits yet</h3><p>Edits stay on this device for 24 hours.</p></div>}
+          </article>) : <div className="emptyResult"><h3>No edits yet</h3><p>Edits are kept for 1 hour. Sign in to sync them across devices.</p></div>}
         </div>}
       </div>
     </section>
+
+    {authOpen && <div className="accountOverlay" role="dialog" aria-modal="true" aria-label="Pixora account" onClick={() => !authBusy && setAuthOpen(false)}>
+      <form className="accountCard" onSubmit={(event) => { event.preventDefault(); void submitAccount(); }} onClick={(event) => event.stopPropagation()}>
+        <button type="button" className="accountClose" disabled={authBusy} onClick={() => setAuthOpen(false)} aria-label="Close">×</button>
+        <span className="accountEyebrow">PIXORA ACCOUNT</span>
+        <h3>Sign in or create account</h3>
+        <p>Enter an email and password. If the email does not exist yet, Pixora creates the account instantly. No email verification.</p>
+        <label>Email</label>
+        <input type="email" value={authEmail} onChange={(event) => setAuthEmail(event.target.value)} placeholder="you@example.com" autoComplete="email" required />
+        <label>Password</label>
+        <input type="password" value={authPassword} onChange={(event) => setAuthPassword(event.target.value)} placeholder="Minimum 6 characters" autoComplete="current-password" minLength={6} required />
+        <button type="submit" className="accountSubmit" disabled={authBusy || !authEmail.trim() || authPassword.length < 6}>{authBusy ? "Signing in…" : "Continue"}</button>
+        <small>Your generated history is synced across devices for 1 hour.</small>
+        {authMessage && <div className="accountMessage">{authMessage}</div>}
+      </form>
+    </div>}
 
     {viewerUrls.length > 0 && <div className="imageViewer" role="dialog" aria-modal="true" aria-label="Image preview" onClick={() => setViewerUrls([])}>
       <button type="button" className="viewerClose" onClick={() => setViewerUrls([])} aria-label="Close preview">×</button>
