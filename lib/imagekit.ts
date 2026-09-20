@@ -10,6 +10,7 @@ export type ImageKitAsset = {
   url?: string;
   createdAt?: string;
   updatedAt?: string;
+  size?: number;
   tags?: string[];
 };
 
@@ -113,7 +114,7 @@ export async function uploadImageKitData(
   if (!response.ok || !result.fileId || !result.url) {
     throw new Error(result.error?.message || result.message || `ImageKit upload failed (${response.status}).`);
   }
-  return { fileId: result.fileId, url: result.url };
+  return { fileId: result.fileId, url: result.url, size: buffer.length };
 }
 
 export async function listImageKitAssets(path: string, limit = 1000) {
