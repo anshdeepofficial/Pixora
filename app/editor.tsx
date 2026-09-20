@@ -954,24 +954,23 @@ export default function Editor() {
   async function downloadOne(url: string, index = 1) {
     const filename = `Pixora-${uniqueDownloadNumber()}.webp`;
     try {
-      const source = originalDownloadUrl(url, filename, "attachment");
       setDownloadProgress({
         percent: 1,
-        label: "Preparing ≤15 MB download in browser download manager…",
+        label: "Preparing download · maximum 15 MB…",
         state: "working",
       });
 
       // Start the native browser download while this function still has the
-      // user's click activation. Pixora never buffers the original in memory.
+      // user's click activation. Compression happens server-side and the page
+      // never buffers the image payload.
       triggerNativeDownload(url, filename);
       setDownloadedUrls((current) => current.includes(url) ? current : [...current, url]);
       setDownloadNoticeUrl(previewForUrl(url));
       window.setTimeout(() => setDownloadNoticeUrl(""), 1600);
 
-      const [size] = await probeDownloadSizes([source]);
       setDownloadProgress({
         percent: 100,
-        label: size > 0 ? `Browser download started · ${formatBytes(size)}` : "Browser download started",
+        label: "Browser download started · maximum 15 MB",
         state: "done",
       });
       window.setTimeout(() => setDownloadProgress({ percent: 0, label: "", state: "idle" }), 2200);
@@ -1006,12 +1005,21 @@ export default function Editor() {
       // The native picker must run before any network await so the browser
       // still recognizes the user's click as active permission.
       await streamZipToDisk(sources, `Pixora-${batchId}.zip`, (progress) => {
+        if (progress.phase === "preparing") {
+          setDownloadProgress({
+            percent: progress.percent,
+            label: `Preparing ≤15 MB files · ${progress.filesDone}/${progress.totalFiles}`,
+            state: "working",
+          });
+          return;
+        }
+
         const remaining = Math.max(0, progress.totalBytes - progress.loadedBytes);
         const sizeText = progress.totalBytes > 0
           ? `${formatBytes(progress.loadedBytes)} / ${formatBytes(progress.totalBytes)} · ${formatBytes(remaining)} remaining`
           : `${formatBytes(progress.loadedBytes)} written`;
         setDownloadProgress({
-          percent: progress.percent,
+          percent: Math.max(8, progress.percent),
           label: `ZIP streaming to disk · ${sizeText} · ${progress.filesDone}/${progress.totalFiles} images`,
           state: "working",
         });
