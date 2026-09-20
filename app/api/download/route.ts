@@ -69,7 +69,7 @@ export async function HEAD(request: Request) {
         "Content-Length": String(compressed.buffer.length),
         "Cache-Control": "private, no-store, max-age=0",
         "X-Content-Type-Options": "nosniff",
-        "X-Pixora-Download-Limit": "15 MiB",
+        "X-Pixora-Download-Limit": "15 MB",
       },
     });
   } catch {
@@ -116,7 +116,7 @@ export async function GET(request: Request) {
         "Content-Disposition": `${disposition}; filename="${filename}"`,
         "Cache-Control": "private, no-store, max-age=0",
         "X-Content-Type-Options": "nosniff",
-        "X-Pixora-Download-Limit": "15 MiB",
+        "X-Pixora-Download-Limit": "15 MB",
       },
     });
   } catch (error) {
