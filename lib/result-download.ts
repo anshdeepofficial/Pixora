@@ -5,8 +5,8 @@ import {
   uploadImageKitData,
 } from "./imagekit";
 
-export const DOWNLOAD_MAX_BYTES = 15 * 1024 * 1024;
-const DOWNLOAD_TARGET_BYTES = DOWNLOAD_MAX_BYTES - 96 * 1024;
+export const DOWNLOAD_MAX_BYTES = 15_000_000;
+const DOWNLOAD_TARGET_BYTES = 14_900_000;
 const DOWNLOAD_MAX_SOURCE_BYTES = 220 * 1024 * 1024;
 const MIN_QUALITY = 48;
 const MAX_QUALITY = 96;
@@ -101,7 +101,7 @@ export async function compressResultToDownloadLimit(
   }
 
   // First preserve the model's full dimensions and find the highest WebP quality
-  // that stays under the hard 15 MiB download ceiling.
+  // that stays under the hard 15 MB download ceiling.
   let result = await bestQualityForSize(source);
   if (result.buffer.length <= DOWNLOAD_TARGET_BYTES) {
     return {
@@ -113,7 +113,7 @@ export async function compressResultToDownloadLimit(
     };
   }
 
-  // Extremely detailed/noisy images can exceed 15 MiB even at low quality.
+  // Extremely detailed/noisy images can exceed 15 MB even at low quality.
   // Reduce dimensions only as much as necessary, then re-run quality search.
   let width = sourceWidth;
   let height = sourceHeight;
