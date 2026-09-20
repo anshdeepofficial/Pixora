@@ -120,6 +120,57 @@ export async function HEAD(request: Request) {
   }
 }
 
+export async function POST(request: Request) {
+  const resolved = await resolveResult(request);
+  if (resolved.error) return resolved.error;
+
+  try {
+    const compressed = await getOrCreateCompressedResult(
+      resolved.outputUrl!.toString(),
+      resolved.taskId!,
+      resolved.fingerprint!,
+      resolved.token!,
+    );
+
+    let size = 0;
+    if ("buffer" in compressed && compressed.buffer) {
+      size = compressed.buffer.length;
+    } else if (compressed.url) {
+      const stored = await fetch(compressed.url, {
+        method: "HEAD",
+        cache: "no-store",
+        redirect: "follow",
+      });
+      if (!stored.ok) {
+        return Response.json({ error: "Prepared download could not be verified." }, { status: 502 });
+      }
+      size = Number(stored.headers.get("content-length") || 0);
+    }
+
+    if (!size || size > DOWNLOAD_MAX_BYTES) {
+      return Response.json({ error: "Prepared image exceeded the 15 MB limit." }, { status: 502 });
+    }
+
+    const ready = new URL(request.url);
+    ready.searchParams.set("prepared", "1");
+    ready.searchParams.set("disposition", "attachment");
+
+    return Response.json({
+      ready: true,
+      size,
+      downloadUrl: `${ready.pathname}?${ready.searchParams.toString()}`,
+    }, {
+      headers: { "Cache-Control": "no-store, max-age=0" },
+    });
+  } catch (error) {
+    console.error("Pixora compressed result preparation failed", error);
+    return Response.json(
+      { error: error instanceof Error ? error.message : "Could not prepare download." },
+      { status: 502 },
+    );
+  }
+}
+
 export async function GET(request: Request) {
   const resolved = await resolveResult(request);
   if (resolved.error) return resolved.error;
