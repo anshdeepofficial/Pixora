@@ -17,6 +17,14 @@ function safeFilename(value: string | null, extension: string) {
   return /\.[a-zA-Z0-9]{2,5}$/.test(cleaned) ? cleaned : `${cleaned}.${extension}`;
 }
 
+function imageKitAttachmentUrl(url: string, filename: string) {
+  const parsed = new URL(url);
+  parsed.searchParams.set("tr", "orig-true");
+  parsed.searchParams.set("ik-attachment", "true");
+  parsed.searchParams.set("ik-attachment-filename", filename.replace(/\.[a-zA-Z0-9]{2,5}$/i, ""));
+  return parsed.toString();
+}
+
 async function resolveResult(request: Request) {
   const requestUrl = new URL(request.url);
   const packedId = requestUrl.searchParams.get("id") || "";
@@ -84,20 +92,11 @@ export async function HEAD(request: Request) {
       resolved.token!,
     );
 
-    let size = 0;
-    if ("buffer" in compressed && compressed.buffer) {
-      size = compressed.buffer.length;
-    } else if (compressed.url) {
-      const stored = await fetch(compressed.url, {
-        method: "HEAD",
-        cache: "no-store",
-        redirect: "follow",
-      });
-      if (!stored.ok) return new Response(null, { status: 502 });
-      size = Number(stored.headers.get("content-length") || 0);
-    }
+    const size = typeof compressed.size === "number"
+      ? compressed.size
+      : ("buffer" in compressed && compressed.buffer ? compressed.buffer.length : 0);
 
-    if (!size || size > DOWNLOAD_MAX_BYTES) {
+    if (size > DOWNLOAD_MAX_BYTES) {
       return Response.json({ error: "Compressed image size is invalid." }, { status: 502 });
     }
 
@@ -132,33 +131,36 @@ export async function POST(request: Request) {
       resolved.token!,
     );
 
-    let size = 0;
-    if ("buffer" in compressed && compressed.buffer) {
-      size = compressed.buffer.length;
-    } else if (compressed.url) {
-      const stored = await fetch(compressed.url, {
-        method: "HEAD",
-        cache: "no-store",
-        redirect: "follow",
-      });
-      if (!stored.ok) {
-        return Response.json({ error: "Prepared download could not be verified." }, { status: 502 });
-      }
-      size = Number(stored.headers.get("content-length") || 0);
-    }
+    const size = typeof compressed.size === "number"
+      ? compressed.size
+      : ("buffer" in compressed && compressed.buffer ? compressed.buffer.length : 0);
 
-    if (!size || size > DOWNLOAD_MAX_BYTES) {
+    if (size > DOWNLOAD_MAX_BYTES) {
       return Response.json({ error: "Prepared image exceeded the 15 MB limit." }, { status: 502 });
     }
 
-    const ready = new URL(request.url);
-    ready.searchParams.set("prepared", "1");
-    ready.searchParams.set("disposition", "attachment");
+    const filename = safeFilename(resolved.requestUrl!.searchParams.get("filename"), "webp");
+
+    if (compressed.url) {
+      return Response.json({
+        ready: true,
+        size,
+        downloadUrl: imageKitAttachmentUrl(compressed.url, filename),
+      }, {
+        headers: { "Cache-Control": "no-store, max-age=0" },
+      });
+    }
+
+    // ImageKit is expected in production. Keep a same-origin fallback for
+    // environments where it is intentionally disabled.
+    const fallback = new URL(request.url);
+    fallback.searchParams.set("prepared", "1");
+    fallback.searchParams.set("disposition", "attachment");
 
     return Response.json({
       ready: true,
       size,
-      downloadUrl: `${ready.pathname}?${ready.searchParams.toString()}`,
+      downloadUrl: `${fallback.pathname}?${fallback.searchParams.toString()}`,
     }, {
       headers: { "Cache-Control": "no-store, max-age=0" },
     });
@@ -184,7 +186,7 @@ export async function GET(request: Request) {
     );
 
     let body: BodyInit;
-    let size = 0;
+    let size = typeof compressed.size === "number" ? compressed.size : 0;
 
     if ("buffer" in compressed && compressed.buffer) {
       body = new Uint8Array(compressed.buffer);
@@ -197,8 +199,8 @@ export async function GET(request: Request) {
       if (!stored.ok || !stored.body) {
         return Response.json({ error: "Compressed image could not be loaded." }, { status: 502 });
       }
-      size = Number(stored.headers.get("content-length") || 0);
-      if (!size || size > DOWNLOAD_MAX_BYTES) {
+      if (!size) size = Number(stored.headers.get("content-length") || 0);
+      if (size > DOWNLOAD_MAX_BYTES) {
         return Response.json({ error: "Compressed image exceeded the 15 MB limit." }, { status: 502 });
       }
       body = stored.body;
@@ -206,7 +208,7 @@ export async function GET(request: Request) {
       return Response.json({ error: "Compressed image is unavailable." }, { status: 502 });
     }
 
-    if (!size || size > DOWNLOAD_MAX_BYTES) {
+    if (size > DOWNLOAD_MAX_BYTES) {
       return Response.json({ error: "Compressed image exceeded the 15 MB limit." }, { status: 502 });
     }
 
@@ -217,7 +219,7 @@ export async function GET(request: Request) {
       status: 200,
       headers: {
         "Content-Type": "image/webp",
-        "Content-Length": String(size),
+        ...(size > 0 ? { "Content-Length": String(size) } : {}),
         "Content-Disposition": `${disposition}; filename="${filename}"`,
         "Cache-Control": "private, no-store, max-age=0",
         "X-Content-Type-Options": "nosniff",
