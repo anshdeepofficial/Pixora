@@ -9,7 +9,7 @@ const MAX_BATCH = 50;
 const MAX_FILE_BYTES = 12 * 1024 * 1024;
 const BATCH_PIPELINE_CONCURRENCY = 4;
 const HISTORY_TTL_MS = 60 * 60 * 1000;
-const APP_VERSION = "1.4.0";
+const APP_VERSION = "1.5.0";
 const APP_VERSION_KEY = "pixora-app-version";
 
 type Mode = "single" | "batch" | "reference";
@@ -952,12 +952,12 @@ export default function Editor() {
   }
 
   async function downloadOne(url: string, index = 1) {
-    const filename = `Pixora-${uniqueDownloadNumber()}`;
+    const filename = `Pixora-${uniqueDownloadNumber()}.webp`;
     try {
       const source = originalDownloadUrl(url, filename, "attachment");
       setDownloadProgress({
         percent: 1,
-        label: "Sending original to browser download manager…",
+        label: "Preparing ≤15 MB download in browser download manager…",
         state: "working",
       });
 
@@ -994,7 +994,7 @@ export default function Editor() {
 
       const sources = sourceUrls.map((url, index) => ({
         url,
-        filename: `Pixora-${batchId}-${String(index + 1).padStart(3, "0")}.png`,
+        filename: `Pixora-${batchId}-${String(index + 1).padStart(3, "0")}.webp`,
       }));
 
       setDownloadProgress({
@@ -1029,8 +1029,8 @@ export default function Editor() {
       setDownloadProgress({
         percent: 5,
         label: totalBytes > 0
-          ? `Sending ${urls.length} originals · ${formatBytes(totalBytes)} total to browser downloads…`
-          : `Sending ${urls.length} originals to browser downloads…`,
+          ? `Sending ${urls.length} compressed images · ${formatBytes(totalBytes)} total to browser downloads…`
+          : `Sending ${urls.length} compressed images to browser downloads…`,
         state: "working",
       });
       for (let index = 0; index < urls.length; index++) {
