@@ -9,7 +9,7 @@ const MAX_BATCH = 50;
 const MAX_FILE_BYTES = 12 * 1024 * 1024;
 const BATCH_PIPELINE_CONCURRENCY = 4;
 const HISTORY_TTL_MS = 60 * 60 * 1000;
-const APP_VERSION = "1.5.1";
+const APP_VERSION = "1.5.2";
 const APP_VERSION_KEY = "pixora-app-version";
 
 type Mode = "single" | "batch" | "reference";
@@ -1045,26 +1045,31 @@ export default function Editor() {
 
       // The native picker must run before any network await so the browser
       // still recognizes the user's click as active permission.
-      await streamZipToDisk(sources, `Pixora-${batchId}.zip`, (progress) => {
-        if (progress.phase === "preparing") {
+      await streamZipToDisk(
+        sources,
+        `Pixora-${batchId}.zip`,
+        (progress) => {
+          if (progress.phase === "preparing") {
+            setDownloadProgress({
+              percent: progress.percent,
+              label: `Preparing ≤15 MB files · ${progress.filesDone}/${progress.totalFiles}`,
+              state: "working",
+            });
+            return;
+          }
+
+          const remaining = Math.max(0, progress.totalBytes - progress.loadedBytes);
+          const sizeText = progress.totalBytes > 0
+            ? `${formatBytes(progress.loadedBytes)} / ${formatBytes(progress.totalBytes)} · ${formatBytes(remaining)} remaining`
+            : `${formatBytes(progress.loadedBytes)} written`;
           setDownloadProgress({
-            percent: progress.percent,
-            label: `Preparing ≤15 MB files · ${progress.filesDone}/${progress.totalFiles}`,
+            percent: Math.max(8, progress.percent),
+            label: `ZIP streaming to disk · ${sizeText} · ${progress.filesDone}/${progress.totalFiles} images`,
             state: "working",
           });
-          return;
-        }
-
-        const remaining = Math.max(0, progress.totalBytes - progress.loadedBytes);
-        const sizeText = progress.totalBytes > 0
-          ? `${formatBytes(progress.loadedBytes)} / ${formatBytes(progress.totalBytes)} · ${formatBytes(remaining)} remaining`
-          : `${formatBytes(progress.loadedBytes)} written`;
-        setDownloadProgress({
-          percent: Math.max(8, progress.percent),
-          label: `ZIP streaming to disk · ${sizeText} · ${progress.filesDone}/${progress.totalFiles} images`,
-          state: "working",
-        });
-      });
+        },
+        async (source) => prepareNativeDownload(source.url, source.filename),
+      );
 
       setDownloadedUrls((current) => Array.from(new Set([...current, ...urls])));
       setDownloadProgress({ percent: 100, label: "ZIP saved to disk", state: "done" });
