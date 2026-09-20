@@ -9,7 +9,7 @@ const MAX_BATCH = 50;
 const MAX_FILE_BYTES = 12 * 1024 * 1024;
 const BATCH_PIPELINE_CONCURRENCY = 4;
 const HISTORY_TTL_MS = 60 * 60 * 1000;
-const APP_VERSION = "1.5.0";
+const APP_VERSION = "1.5.1";
 const APP_VERSION_KEY = "pixora-app-version";
 
 type Mode = "single" | "batch" | "reference";
@@ -941,39 +941,80 @@ export default function Editor() {
     return `/api/download?${params.toString()}`;
   }
 
-  function triggerNativeDownload(url: string, filename: string) {
+  async function prepareNativeDownload(url: string, filename: string) {
+    const target = originalDownloadUrl(url, filename, "attachment");
+    const parsed = new URL(target, window.location.origin);
+
+    if (parsed.pathname === "/api/result") {
+      const response = await fetch(target, {
+        method: "POST",
+        cache: "no-store",
+      });
+      const data = await response.json().catch(() => ({})) as {
+        ready?: boolean;
+        size?: number;
+        downloadUrl?: string;
+        error?: string;
+      };
+      if (!response.ok || !data.ready || !data.downloadUrl) {
+        throw new Error(data.error || "Download could not be prepared.");
+      }
+      return {
+        url: data.downloadUrl,
+        size: typeof data.size === "number" ? data.size : 0,
+      };
+    }
+
+    const response = await fetch(target, { method: "HEAD", cache: "no-store" });
+    if (!response.ok) throw new Error("Download could not be prepared.");
+    return {
+      url: target,
+      size: Number(response.headers.get("content-length") || 0),
+    };
+  }
+
+  function triggerPreparedDownload(downloadUrl: string, filename: string) {
     const anchor = document.createElement("a");
-    anchor.href = originalDownloadUrl(url, filename, "attachment");
+    anchor.href = downloadUrl;
     anchor.download = filename;
+    anchor.rel = "noopener";
     anchor.style.display = "none";
     document.body.appendChild(anchor);
     anchor.click();
-    anchor.remove();
+    window.setTimeout(() => anchor.remove(), 1000);
   }
 
   async function downloadOne(url: string, index = 1) {
     const filename = `Pixora-${uniqueDownloadNumber()}.webp`;
     try {
       setDownloadProgress({
-        percent: 1,
-        label: "Preparing download · maximum 15 MB…",
+        percent: 5,
+        label: "Preparing download · compressing to maximum 15 MB…",
         state: "working",
       });
 
-      // Start the native browser download while this function still has the
-      // user's click activation. Compression happens server-side and the page
-      // never buffers the image payload.
-      triggerNativeDownload(url, filename);
+      const prepared = await prepareNativeDownload(url, filename);
+      setDownloadProgress({
+        percent: 90,
+        label: prepared.size > 0
+          ? `Ready · ${formatBytes(prepared.size)} · starting browser download…`
+          : "Ready · starting browser download…",
+        state: "working",
+      });
+
+      triggerPreparedDownload(prepared.url, filename);
       setDownloadedUrls((current) => current.includes(url) ? current : [...current, url]);
       setDownloadNoticeUrl(previewForUrl(url));
       window.setTimeout(() => setDownloadNoticeUrl(""), 1600);
 
       setDownloadProgress({
         percent: 100,
-        label: "Browser download started · maximum 15 MB",
+        label: prepared.size > 0
+          ? `Download started · ${formatBytes(prepared.size)}`
+          : "Download started",
         state: "done",
       });
-      window.setTimeout(() => setDownloadProgress({ percent: 0, label: "", state: "idle" }), 2200);
+      window.setTimeout(() => setDownloadProgress({ percent: 0, label: "", state: "idle" }), 2600);
     } catch (error) {
       const detail = error instanceof Error ? error.message : "Download failed";
       setSingleMessage(detail);
@@ -1042,12 +1083,16 @@ export default function Editor() {
         state: "working",
       });
       for (let index = 0; index < urls.length; index++) {
-        triggerNativeDownload(
-          urls[index],
-          `Pixora-${uniqueDownloadNumber()}`,
-        );
+        const filename = `Pixora-${uniqueDownloadNumber()}.webp`;
+        setDownloadProgress({
+          percent: 5 + ((index / Math.max(1, urls.length)) * 90),
+          label: `Preparing image ${index + 1} of ${urls.length}…`,
+          state: "working",
+        });
+        const prepared = await prepareNativeDownload(urls[index], filename);
+        triggerPreparedDownload(prepared.url, filename);
         setDownloadedUrls((current) => current.includes(urls[index]) ? current : [...current, urls[index]]);
-        await new Promise((resolve) => window.setTimeout(resolve, 120));
+        await new Promise((resolve) => window.setTimeout(resolve, 180));
       }
       setDownloadProgress({
         percent: 100,
