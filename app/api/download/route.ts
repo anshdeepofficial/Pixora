@@ -1,3 +1,5 @@
+import { DOWNLOAD_MAX_BYTES, compressResultToDownloadLimit } from "../../../lib/result-download";
+
 const ALLOWED_HOSTS = [
   "vmodel.ai",
   "vmimgs.com",
@@ -11,15 +13,6 @@ const ALLOWED_HOSTS = [
 
 function isAllowedImageUrl(imageUrl: URL) {
   return imageUrl.protocol === "https:" && ALLOWED_HOSTS.some((host) => imageUrl.hostname === host || imageUrl.hostname.endsWith(`.${host}`));
-}
-
-function extensionFromType(type: string, imageUrl: URL) {
-  if (type.includes("jpeg")) return "jpg";
-  if (type.includes("webp")) return "webp";
-  if (type.includes("gif")) return "gif";
-  if (type.includes("avif")) return "avif";
-  const match = imageUrl.pathname.match(/\.(png|jpe?g|webp|gif|avif)$/i);
-  return match ? match[1].toLowerCase().replace("jpeg", "jpg") : "png";
 }
 
 function safeFilename(value: string | null, extension: string) {
@@ -54,22 +47,31 @@ export async function HEAD(request: Request) {
 
   try {
     const upstream = await fetch(resolved.imageUrl!, {
-      method: "HEAD",
       cache: "no-store",
       redirect: "follow",
       headers: { Accept: "image/avif,image/webp,image/png,image/jpeg,image/*,*/*;q=0.8" },
     });
     if (!upstream.ok) return new Response(null, { status: 502 });
 
-    const headers = new Headers({
-      "Cache-Control": "private, no-store, max-age=0",
-      "X-Content-Type-Options": "nosniff",
+    const contentType = upstream.headers.get("content-type") || "";
+    if (contentType && !contentType.toLowerCase().startsWith("image/")) {
+      return new Response(null, { status: 502 });
+    }
+
+    const source = Buffer.from(await upstream.arrayBuffer());
+    const compressed = await compressResultToDownloadLimit(source);
+    if (compressed.buffer.length > DOWNLOAD_MAX_BYTES) return new Response(null, { status: 502 });
+
+    return new Response(null, {
+      status: 200,
+      headers: {
+        "Content-Type": "image/webp",
+        "Content-Length": String(compressed.buffer.length),
+        "Cache-Control": "private, no-store, max-age=0",
+        "X-Content-Type-Options": "nosniff",
+        "X-Pixora-Download-Limit": "15 MiB",
+      },
     });
-    const type = upstream.headers.get("content-type");
-    const length = upstream.headers.get("content-length");
-    if (type) headers.set("Content-Type", type);
-    if (length) headers.set("Content-Length", length);
-    return new Response(null, { status: 200, headers });
   } catch {
     return new Response(null, { status: 502 });
   }
@@ -88,30 +90,40 @@ export async function GET(request: Request) {
       headers: { Accept: "image/avif,image/webp,image/png,image/jpeg,image/*,*/*;q=0.8" },
     });
 
-    if (!upstream.ok || !upstream.body) {
+    if (!upstream.ok) {
       return Response.json({ error: `Image could not be downloaded (${upstream.status}).` }, { status: 502 });
     }
 
-    const contentType = upstream.headers.get("content-type") || "image/png";
-    if (!contentType.toLowerCase().startsWith("image/")) {
+    const contentType = upstream.headers.get("content-type") || "";
+    if (contentType && !contentType.toLowerCase().startsWith("image/")) {
       return Response.json({ error: "The upstream URL did not return an image." }, { status: 502 });
     }
 
-    const extension = extensionFromType(contentType, imageUrl);
-    const filename = safeFilename(requestUrl.searchParams.get("filename"), extension);
-    const disposition = requestUrl.searchParams.get("disposition") === "inline" ? "inline" : "attachment";
-    const headers = new Headers({
-      "Content-Type": contentType,
-      "Content-Disposition": `${disposition}; filename="${filename}"`,
-      "Cache-Control": "private, no-store, max-age=0",
-      "X-Content-Type-Options": "nosniff",
-    });
-    const length = upstream.headers.get("content-length");
-    if (length) headers.set("Content-Length", length);
+    const source = Buffer.from(await upstream.arrayBuffer());
+    const compressed = await compressResultToDownloadLimit(source);
+    if (compressed.buffer.length > DOWNLOAD_MAX_BYTES) {
+      return Response.json({ error: "Compressed image exceeded the 15 MB limit." }, { status: 502 });
+    }
 
-    return new Response(upstream.body, { status: 200, headers });
+    const filename = safeFilename(requestUrl.searchParams.get("filename"), "webp");
+    const disposition = requestUrl.searchParams.get("disposition") === "inline" ? "inline" : "attachment";
+
+    return new Response(new Uint8Array(compressed.buffer), {
+      status: 200,
+      headers: {
+        "Content-Type": "image/webp",
+        "Content-Length": String(compressed.buffer.length),
+        "Content-Disposition": `${disposition}; filename="${filename}"`,
+        "Cache-Control": "private, no-store, max-age=0",
+        "X-Content-Type-Options": "nosniff",
+        "X-Pixora-Download-Limit": "15 MiB",
+      },
+    });
   } catch (error) {
-    console.error("Pixora download proxy failed", error);
-    return Response.json({ error: "Image download request failed." }, { status: 502 });
+    console.error("Pixora download compression failed", error);
+    return Response.json(
+      { error: error instanceof Error ? error.message : "Image download request failed." },
+      { status: 502 },
+    );
   }
 }
