@@ -7,6 +7,25 @@ type CreateTaskInput = {
   aspectRatio?: string;
 };
 
+function promptWithAspectRatioOutpaint(prompt: string, aspectRatio?: string) {
+  const requested = aspectRatio?.trim() || "default";
+  if (requested === "default") return prompt.trim();
+
+  return `${prompt.trim()}
+
+MANDATORY OUTPUT-FORMAT / OUTPAINTING RULES:
+- The final canvas must be exactly ${requested}.
+- Achieve the new aspect ratio by extending/outpainting the canvas around the existing image, not by cropping or reframing the original content.
+- Preserve the original subject at the same visual scale, camera distance, body size, pose, facial identity, clothing, proportions, orientation, and placement.
+- Do not zoom in. Do not zoom out. Do not crop any original subject or important original content.
+- Do not stretch, squeeze, rotate, redesign, regenerate, or reposition the subject to make it fit.
+- Treat the original image content as the protected composition. Generate new pixels only where extra canvas is needed.
+- Extend the existing background, lighting, textures, scenery, floor, walls, sky, environment, and perspective naturally into the newly added canvas area.
+- Make the extension seamless, realistic, and consistent with the source image.
+- If the source and target aspect ratios differ significantly, keep the entire original composition intact and add the required space around it rather than changing the camera framing.
+These output-format rules override any accidental tendency to crop, zoom, reframe, or alter the subject.`;
+}
+
 export async function createVModelTask(token: string, input: CreateTaskInput) {
   const response = await fetch("https://api.vmodel.ai/api/tasks/v1/create", {
     method: "POST",
@@ -16,7 +35,7 @@ export async function createVModelTask(token: string, input: CreateTaskInput) {
       input: {
         input_image: input.imageUrl,
         ...(input.referenceImageUrl ? { ref_image: input.referenceImageUrl } : {}),
-        prompt: input.prompt.trim(),
+        prompt: promptWithAspectRatioOutpaint(input.prompt, input.aspectRatio),
         aspect_ratio: input.aspectRatio || "default",
         // Highest quality supported by V-Editor: 4 MP generation and 4K result.
         // Keep PNG so Pixora does not introduce lossy JPEG compression.
