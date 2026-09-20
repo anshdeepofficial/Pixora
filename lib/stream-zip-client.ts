@@ -177,6 +177,10 @@ export async function streamZipToDisk(
   sources: Array<{ url: string; filename: string }>,
   suggestedName: string,
   onProgress: (progress: ZipProgress) => void,
+  prepareSource?: (
+    source: { url: string; filename: string },
+    index: number,
+  ) => Promise<{ url: string; size?: number }>,
 ) {
   const picker = (window as unknown as { showSaveFilePicker?: SavePicker }).showSaveFilePicker;
   if (!picker) throw new Error("Streaming ZIP download is not supported by this browser.");
@@ -189,25 +193,50 @@ export async function streamZipToDisk(
   const writable = await handle.createWritable();
 
   try {
-    const sizes = await probeDownloadSizes(
-      sources.map((item) => item.url),
-      (completed, total) => onProgress({
-        loadedBytes: 0,
-        totalBytes: 0,
-        filesDone: completed,
-        totalFiles: total,
-        percent: Math.min(8, (completed / Math.max(1, total)) * 8),
-        phase: "preparing",
-      }),
-    );
-    const totalBytes = sizes.reduce((sum, size) => sum + size, 0);
+    let preparedSources = sources.map((source) => ({ ...source, size: 0 }));
+
+    if (prepareSource) {
+      let completed = 0;
+      preparedSources = await mapLimit(sources, 4, async (source, index) => {
+        const prepared = await prepareSource(source, index);
+        completed += 1;
+        onProgress({
+          loadedBytes: 0,
+          totalBytes: 0,
+          filesDone: completed,
+          totalFiles: sources.length,
+          percent: Math.min(8, (completed / Math.max(1, sources.length)) * 8),
+          phase: "preparing",
+        });
+        return {
+          ...source,
+          url: prepared.url,
+          size: typeof prepared.size === "number" ? prepared.size : 0,
+        };
+      });
+    } else {
+      const sizes = await probeDownloadSizes(
+        sources.map((item) => item.url),
+        (completed, total) => onProgress({
+          loadedBytes: 0,
+          totalBytes: 0,
+          filesDone: completed,
+          totalFiles: total,
+          percent: Math.min(8, (completed / Math.max(1, total)) * 8),
+          phase: "preparing",
+        }),
+      );
+      preparedSources = sources.map((source, index) => ({ ...source, size: sizes[index] || 0 }));
+    }
+
+    const totalBytes = preparedSources.reduce((sum, source) => sum + source.size, 0);
     let loadedBytes = 0;
     let offset = 0;
     const central: Uint8Array[] = [];
     const encoder = new TextEncoder();
 
-    for (let index = 0; index < sources.length; index++) {
-      const source = sources[index];
+    for (let index = 0; index < preparedSources.length; index++) {
+      const source = preparedSources[index];
       const response = await fetch(source.url, { cache: "no-store" });
       if (!response.ok || !response.body) throw new Error(`Could not download image ${index + 1}.`);
 
