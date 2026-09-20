@@ -2,7 +2,12 @@ import {
   getVModelToken,
   getVModelTokenByFingerprint,
   unpackVModelTaskId,
+  vModelTokenFingerprint,
 } from "../../../lib/vmodel-token";
+import {
+  DOWNLOAD_MAX_BYTES,
+  getOrCreateCompressedResult,
+} from "../../../lib/result-download";
 
 function safeFilename(value: string | null, extension: string) {
   const fallback = `Pixora-${Date.now()}.${extension}`;
@@ -10,15 +15,6 @@ function safeFilename(value: string | null, extension: string) {
   const cleaned = value.replace(/[^a-zA-Z0-9._-]/g, "-").replace(/-+/g, "-").slice(0, 120);
   if (!cleaned) return fallback;
   return /\.[a-zA-Z0-9]{2,5}$/.test(cleaned) ? cleaned : `${cleaned}.${extension}`;
-}
-
-function extensionFromType(type: string, outputUrl: URL) {
-  if (type.includes("jpeg")) return "jpg";
-  if (type.includes("webp")) return "webp";
-  if (type.includes("gif")) return "gif";
-  if (type.includes("avif")) return "avif";
-  const match = outputUrl.pathname.match(/\.(png|jpe?g|webp|gif|avif)$/i);
-  return match ? match[1].toLowerCase().replace("jpeg", "jpg") : "png";
 }
 
 async function resolveResult(request: Request) {
@@ -67,44 +63,61 @@ async function resolveResult(request: Request) {
     return { error: Response.json({ error: "Invalid original result URL." }, { status: 502 }) };
   }
 
-  return { token, outputUrl, requestUrl };
-}
-
-async function fetchOriginal(
-  outputUrl: URL,
-  token: string,
-  method: "GET" | "HEAD",
-) {
-  const response = await fetch(outputUrl, {
-    method,
-    cache: "no-store",
-    redirect: "follow",
-    headers: {
-      Authorization: `Bearer ${token}`,
-      Accept: "image/png,image/jpeg,image/webp,image/*,*/*;q=0.8",
-    },
-  });
-  return response;
+  return {
+    token,
+    outputUrl,
+    requestUrl,
+    taskId: unpacked.taskId,
+    fingerprint: unpacked.fingerprint || vModelTokenFingerprint(token),
+  };
 }
 
 export async function HEAD(request: Request) {
   const resolved = await resolveResult(request);
   if (resolved.error) return resolved.error;
 
-  const upstream = await fetchOriginal(resolved.outputUrl!, resolved.token!, "HEAD");
-  if (!upstream.ok) {
-    return Response.json({ error: `Original image is unavailable (${upstream.status}).` }, { status: 502 });
-  }
+  try {
+    const compressed = await getOrCreateCompressedResult(
+      resolved.outputUrl!.toString(),
+      resolved.taskId!,
+      resolved.fingerprint!,
+      resolved.token!,
+    );
 
-  const headers = new Headers({
-    "Cache-Control": "private, no-store, max-age=0",
-    "X-Content-Type-Options": "nosniff",
-  });
-  const type = upstream.headers.get("content-type");
-  const length = upstream.headers.get("content-length");
-  if (type) headers.set("Content-Type", type);
-  if (length) headers.set("Content-Length", length);
-  return new Response(null, { status: 200, headers });
+    let size = 0;
+    if ("buffer" in compressed && compressed.buffer) {
+      size = compressed.buffer.length;
+    } else if (compressed.url) {
+      const stored = await fetch(compressed.url, {
+        method: "HEAD",
+        cache: "no-store",
+        redirect: "follow",
+      });
+      if (!stored.ok) return new Response(null, { status: 502 });
+      size = Number(stored.headers.get("content-length") || 0);
+    }
+
+    if (!size || size > DOWNLOAD_MAX_BYTES) {
+      return Response.json({ error: "Compressed image size is invalid." }, { status: 502 });
+    }
+
+    return new Response(null, {
+      status: 200,
+      headers: {
+        "Content-Type": "image/webp",
+        "Content-Length": String(size),
+        "Cache-Control": "private, no-store, max-age=0",
+        "X-Content-Type-Options": "nosniff",
+        "X-Pixora-Download-Limit": "15 MiB",
+      },
+    });
+  } catch (error) {
+    console.error("Pixora compressed result HEAD failed", error);
+    return Response.json(
+      { error: error instanceof Error ? error.message : "Could not prepare compressed download." },
+      { status: 502 },
+    );
+  }
 }
 
 export async function GET(request: Request) {
@@ -112,35 +125,59 @@ export async function GET(request: Request) {
   if (resolved.error) return resolved.error;
 
   try {
-    const upstream = await fetchOriginal(resolved.outputUrl!, resolved.token!, "GET");
-    if (!upstream.ok || !upstream.body) {
-      return Response.json(
-        { error: `Original image could not be downloaded (${upstream.status}).` },
-        { status: 502 },
-      );
+    const compressed = await getOrCreateCompressedResult(
+      resolved.outputUrl!.toString(),
+      resolved.taskId!,
+      resolved.fingerprint!,
+      resolved.token!,
+    );
+
+    let body: BodyInit;
+    let size = 0;
+
+    if ("buffer" in compressed && compressed.buffer) {
+      body = compressed.buffer;
+      size = compressed.buffer.length;
+    } else if (compressed.url) {
+      const stored = await fetch(compressed.url, {
+        cache: "no-store",
+        redirect: "follow",
+      });
+      if (!stored.ok || !stored.body) {
+        return Response.json({ error: "Compressed image could not be loaded." }, { status: 502 });
+      }
+      size = Number(stored.headers.get("content-length") || 0);
+      if (!size || size > DOWNLOAD_MAX_BYTES) {
+        return Response.json({ error: "Compressed image exceeded the 15 MB limit." }, { status: 502 });
+      }
+      body = stored.body;
+    } else {
+      return Response.json({ error: "Compressed image is unavailable." }, { status: 502 });
     }
 
-    const contentType = upstream.headers.get("content-type") || "image/png";
-    if (!contentType.toLowerCase().startsWith("image/")) {
-      return Response.json({ error: "The original result did not return an image." }, { status: 502 });
+    if (!size || size > DOWNLOAD_MAX_BYTES) {
+      return Response.json({ error: "Compressed image exceeded the 15 MB limit." }, { status: 502 });
     }
 
-    const extension = extensionFromType(contentType, resolved.outputUrl!);
     const disposition = resolved.requestUrl!.searchParams.get("disposition") === "attachment" ? "attachment" : "inline";
-    const filename = safeFilename(resolved.requestUrl!.searchParams.get("filename"), extension);
+    const filename = safeFilename(resolved.requestUrl!.searchParams.get("filename"), "webp");
 
-    const headers = new Headers({
-      "Content-Type": contentType,
-      "Content-Disposition": `${disposition}; filename="${filename}"`,
-      "Cache-Control": "private, no-store, max-age=0",
-      "X-Content-Type-Options": "nosniff",
+    return new Response(body, {
+      status: 200,
+      headers: {
+        "Content-Type": "image/webp",
+        "Content-Length": String(size),
+        "Content-Disposition": `${disposition}; filename="${filename}"`,
+        "Cache-Control": "private, no-store, max-age=0",
+        "X-Content-Type-Options": "nosniff",
+        "X-Pixora-Download-Limit": "15 MiB",
+      },
     });
-    const length = upstream.headers.get("content-length");
-    if (length) headers.set("Content-Length", length);
-
-    return new Response(upstream.body, { status: 200, headers });
   } catch (error) {
-    console.error("Pixora original result proxy failed", error);
-    return Response.json({ error: "Original image download failed." }, { status: 502 });
+    console.error("Pixora compressed result download failed", error);
+    return Response.json(
+      { error: error instanceof Error ? error.message : "Could not prepare compressed download." },
+      { status: 502 },
+    );
   }
 }
