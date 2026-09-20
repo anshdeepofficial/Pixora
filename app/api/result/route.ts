@@ -136,7 +136,7 @@ export async function GET(request: Request) {
     let size = 0;
 
     if ("buffer" in compressed && compressed.buffer) {
-      body = compressed.buffer;
+      body = new Uint8Array(compressed.buffer);
       size = compressed.buffer.length;
     } else if (compressed.url) {
       const stored = await fetch(compressed.url, {
