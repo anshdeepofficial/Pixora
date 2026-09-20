@@ -6,6 +6,7 @@ export type ZipProgress = {
   filesDone: number;
   totalFiles: number;
   percent: number;
+  phase: "preparing" | "streaming";
 };
 
 type WritableLike = {
@@ -153,7 +154,11 @@ export function supportsStreamingZip() {
   return typeof window !== "undefined" && typeof (window as unknown as { showSaveFilePicker?: SavePicker }).showSaveFilePicker === "function";
 }
 
-export async function probeDownloadSizes(urls: string[]) {
+export async function probeDownloadSizes(
+  urls: string[],
+  onPrepared?: (completed: number, total: number) => void,
+) {
+  let completed = 0;
   return mapLimit(urls, 6, async (url) => {
     try {
       const response = await fetch(url, { method: "HEAD", cache: "no-store" });
@@ -161,6 +166,9 @@ export async function probeDownloadSizes(urls: string[]) {
       return response.ok && Number.isFinite(size) && size > 0 ? size : 0;
     } catch {
       return 0;
+    } finally {
+      completed += 1;
+      onPrepared?.(completed, urls.length);
     }
   });
 }
@@ -181,7 +189,17 @@ export async function streamZipToDisk(
   const writable = await handle.createWritable();
 
   try {
-    const sizes = await probeDownloadSizes(sources.map((item) => item.url));
+    const sizes = await probeDownloadSizes(
+      sources.map((item) => item.url),
+      (completed, total) => onProgress({
+        loadedBytes: 0,
+        totalBytes: 0,
+        filesDone: completed,
+        totalFiles: total,
+        percent: Math.min(8, (completed / Math.max(1, total)) * 8),
+        phase: "preparing",
+      }),
+    );
     const totalBytes = sizes.reduce((sum, size) => sum + size, 0);
     let loadedBytes = 0;
     let offset = 0;
@@ -221,6 +239,7 @@ export async function streamZipToDisk(
           filesDone: index,
           totalFiles: sources.length,
           percent,
+          phase: "streaming",
         });
       }
 
@@ -240,6 +259,7 @@ export async function streamZipToDisk(
         filesDone: index + 1,
         totalFiles: sources.length,
         percent: totalBytes > 0 ? Math.min(99, (loadedBytes / totalBytes) * 100) : ((index + 1) / sources.length) * 100,
+        phase: "streaming",
       });
     }
 
@@ -261,6 +281,7 @@ export async function streamZipToDisk(
       filesDone: sources.length,
       totalFiles: sources.length,
       percent: 100,
+      phase: "streaming",
     });
   } catch (error) {
     await writable.abort?.(error).catch(() => undefined);
