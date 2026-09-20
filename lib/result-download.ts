@@ -19,7 +19,11 @@ function downloadFolder(fingerprint: string) {
 export async function getStoredCompressedResult(taskId: string, fingerprint: string) {
   if (!imageKitConfigured()) return null;
   const asset = await findImageKitAssetByName(downloadFolder(fingerprint), `${taskId}.webp`);
-  return asset?.url || null;
+  if (!asset?.url) return null;
+  return {
+    url: asset.url,
+    size: typeof asset.size === "number" ? asset.size : 0,
+  };
 }
 
 async function encodeWebp(
@@ -169,7 +173,7 @@ export async function getOrCreateCompressedResult(
 ) {
   if (imageKitConfigured()) {
     const existing = await getStoredCompressedResult(taskId, fingerprint);
-    if (existing) return { url: existing, created: false };
+    if (existing) return { url: existing.url, size: existing.size, created: false };
   }
 
   const headers = new Headers({ Accept: "image/png,image/jpeg,image/webp,image/*,*/*;q=0.8" });
@@ -199,6 +203,7 @@ export async function getOrCreateCompressedResult(
   if (!imageKitConfigured()) {
     return {
       buffer: compressed.buffer,
+      size: compressed.buffer.length,
       created: true,
       metadata: compressed,
     };
@@ -213,6 +218,7 @@ export async function getOrCreateCompressedResult(
 
   return {
     url: stored.url,
+    size: stored.size,
     created: true,
     metadata: compressed,
   };
