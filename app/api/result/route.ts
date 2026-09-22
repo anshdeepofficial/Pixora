@@ -2,27 +2,24 @@ import {
   getVModelToken,
   getVModelTokenByFingerprint,
   unpackVModelTaskId,
-  vModelTokenFingerprint,
 } from "../../../lib/vmodel-token";
-import {
-  DOWNLOAD_MAX_BYTES,
-  getOrCreateCompressedResult,
-} from "../../../lib/result-download";
 
 function safeFilename(value: string | null, extension: string) {
   const fallback = `Pixora-${Date.now()}.${extension}`;
   if (!value) return fallback;
   const cleaned = value.replace(/[^a-zA-Z0-9._-]/g, "-").replace(/-+/g, "-").slice(0, 120);
-  if (!cleaned) return fallback;
-  return /\.[a-zA-Z0-9]{2,5}$/.test(cleaned) ? cleaned : `${cleaned}.${extension}`;
+  const base = cleaned.replace(/\.[a-zA-Z0-9]{2,5}$/i, "") || `Pixora-${Date.now()}`;
+  return `${base}.${extension}`;
 }
 
-function imageKitAttachmentUrl(url: string, filename: string) {
-  const parsed = new URL(url);
-  parsed.searchParams.set("tr", "orig-true");
-  parsed.searchParams.set("ik-attachment", "true");
-  parsed.searchParams.set("ik-attachment-filename", filename.replace(/\.[a-zA-Z0-9]{2,5}$/i, ""));
-  return parsed.toString();
+function extensionFrom(contentType: string, sourceUrl: URL) {
+  const type = contentType.toLowerCase();
+  if (type.includes("png")) return "png";
+  if (type.includes("webp")) return "webp";
+  if (type.includes("jpeg") || type.includes("jpg")) return "jpg";
+  if (type.includes("avif")) return "avif";
+  const match = sourceUrl.pathname.match(/\.([a-zA-Z0-9]{2,5})$/);
+  return match?.[1]?.toLowerCase() || "png";
 }
 
 async function resolveResult(request: Request) {
@@ -64,113 +61,64 @@ async function resolveResult(request: Request) {
     };
   }
 
-  let outputUrl: URL;
   try {
-    outputUrl = new URL(task.result.output[0]);
+    return {
+      requestUrl,
+      outputUrl: new URL(task.result.output[0]),
+    };
   } catch {
     return { error: Response.json({ error: "Invalid original result URL." }, { status: 502 }) };
   }
+}
 
-  return {
-    token,
-    outputUrl,
-    requestUrl,
-    taskId: unpacked.taskId,
-    fingerprint: unpacked.fingerprint || vModelTokenFingerprint(token),
-  };
+async function upstreamHead(outputUrl: URL) {
+  try {
+    const response = await fetch(outputUrl, {
+      method: "HEAD",
+      cache: "no-store",
+      redirect: "follow",
+      headers: { Accept: "image/avif,image/webp,image/png,image/jpeg,image/*,*/*;q=0.8" },
+    });
+    if (!response.ok) return null;
+    return response;
+  } catch {
+    return null;
+  }
 }
 
 export async function HEAD(request: Request) {
   const resolved = await resolveResult(request);
   if (resolved.error) return resolved.error;
 
-  try {
-    const compressed = await getOrCreateCompressedResult(
-      resolved.outputUrl!.toString(),
-      resolved.taskId!,
-      resolved.fingerprint!,
-      resolved.token!,
-    );
+  const upstream = await upstreamHead(resolved.outputUrl!);
+  const contentType = upstream?.headers.get("content-type") || "image/png";
+  const contentLength = upstream?.headers.get("content-length");
 
-    const size = typeof compressed.size === "number"
-      ? compressed.size
-      : ("buffer" in compressed && compressed.buffer ? compressed.buffer.length : 0);
-
-    if (size > DOWNLOAD_MAX_BYTES) {
-      return Response.json({ error: "Compressed image size is invalid." }, { status: 502 });
-    }
-
-    return new Response(null, {
-      status: 200,
-      headers: {
-        "Content-Type": "image/webp",
-        "Content-Length": String(size),
-        "Cache-Control": "private, no-store, max-age=0",
-        "X-Content-Type-Options": "nosniff",
-        "X-Pixora-Download-Limit": "15 MB",
-      },
-    });
-  } catch (error) {
-    console.error("Pixora compressed result HEAD failed", error);
-    return Response.json(
-      { error: error instanceof Error ? error.message : "Could not prepare compressed download." },
-      { status: 502 },
-    );
-  }
+  return new Response(null, {
+    status: 200,
+    headers: {
+      "Content-Type": contentType,
+      ...(contentLength ? { "Content-Length": contentLength } : {}),
+      "Cache-Control": "private, no-store, max-age=0",
+      "X-Content-Type-Options": "nosniff",
+      "X-Pixora-Original-Result": "true",
+    },
+  });
 }
 
 export async function POST(request: Request) {
   const resolved = await resolveResult(request);
   if (resolved.error) return resolved.error;
 
-  try {
-    const compressed = await getOrCreateCompressedResult(
-      resolved.outputUrl!.toString(),
-      resolved.taskId!,
-      resolved.fingerprint!,
-      resolved.token!,
-    );
-
-    const size = typeof compressed.size === "number"
-      ? compressed.size
-      : ("buffer" in compressed && compressed.buffer ? compressed.buffer.length : 0);
-
-    if (size > DOWNLOAD_MAX_BYTES) {
-      return Response.json({ error: "Prepared image exceeded the 15 MB limit." }, { status: 502 });
-    }
-
-    const filename = safeFilename(resolved.requestUrl!.searchParams.get("filename"), "webp");
-
-    if (compressed.url) {
-      return Response.json({
-        ready: true,
-        size,
-        downloadUrl: imageKitAttachmentUrl(compressed.url, filename),
-      }, {
-        headers: { "Cache-Control": "no-store, max-age=0" },
-      });
-    }
-
-    // ImageKit is expected in production. Keep a same-origin fallback for
-    // environments where it is intentionally disabled.
-    const fallback = new URL(request.url);
-    fallback.searchParams.set("prepared", "1");
-    fallback.searchParams.set("disposition", "attachment");
-
-    return Response.json({
-      ready: true,
-      size,
-      downloadUrl: `${fallback.pathname}?${fallback.searchParams.toString()}`,
-    }, {
-      headers: { "Cache-Control": "no-store, max-age=0" },
-    });
-  } catch (error) {
-    console.error("Pixora compressed result preparation failed", error);
-    return Response.json(
-      { error: error instanceof Error ? error.message : "Could not prepare download." },
-      { status: 502 },
-    );
-  }
+  const requestUrl = resolved.requestUrl!;
+  requestUrl.searchParams.set("disposition", "attachment");
+  return Response.json({
+    ready: true,
+    size: 0,
+    downloadUrl: `${requestUrl.pathname}?${requestUrl.searchParams.toString()}`,
+  }, {
+    headers: { "Cache-Control": "no-store, max-age=0" },
+  });
 }
 
 export async function GET(request: Request) {
@@ -178,58 +126,41 @@ export async function GET(request: Request) {
   if (resolved.error) return resolved.error;
 
   try {
-    const compressed = await getOrCreateCompressedResult(
-      resolved.outputUrl!.toString(),
-      resolved.taskId!,
-      resolved.fingerprint!,
-      resolved.token!,
-    );
+    const upstream = await fetch(resolved.outputUrl!, {
+      cache: "no-store",
+      redirect: "follow",
+      headers: { Accept: "image/avif,image/webp,image/png,image/jpeg,image/*,*/*;q=0.8" },
+    });
 
-    let body: BodyInit;
-    let size = typeof compressed.size === "number" ? compressed.size : 0;
-
-    if ("buffer" in compressed && compressed.buffer) {
-      body = new Uint8Array(compressed.buffer);
-      size = compressed.buffer.length;
-    } else if (compressed.url) {
-      const stored = await fetch(compressed.url, {
-        cache: "no-store",
-        redirect: "follow",
-      });
-      if (!stored.ok || !stored.body) {
-        return Response.json({ error: "Compressed image could not be loaded." }, { status: 502 });
-      }
-      if (!size) size = Number(stored.headers.get("content-length") || 0);
-      if (size > DOWNLOAD_MAX_BYTES) {
-        return Response.json({ error: "Compressed image exceeded the 15 MB limit." }, { status: 502 });
-      }
-      body = stored.body;
-    } else {
-      return Response.json({ error: "Compressed image is unavailable." }, { status: 502 });
+    if (!upstream.ok || !upstream.body) {
+      return Response.json({ error: `Original image could not be downloaded (${upstream.status}).` }, { status: 502 });
     }
 
-    if (size > DOWNLOAD_MAX_BYTES) {
-      return Response.json({ error: "Compressed image exceeded the 15 MB limit." }, { status: 502 });
+    const contentType = upstream.headers.get("content-type") || "image/png";
+    if (!contentType.toLowerCase().startsWith("image/")) {
+      return Response.json({ error: "The generated result did not return an image." }, { status: 502 });
     }
 
-    const disposition = resolved.requestUrl!.searchParams.get("disposition") === "attachment" ? "attachment" : "inline";
-    const filename = safeFilename(resolved.requestUrl!.searchParams.get("filename"), "webp");
+    const extension = extensionFrom(contentType, resolved.outputUrl!);
+    const filename = safeFilename(resolved.requestUrl!.searchParams.get("filename"), extension);
+    const disposition = resolved.requestUrl!.searchParams.get("disposition") === "inline" ? "inline" : "attachment";
+    const contentLength = upstream.headers.get("content-length");
 
-    return new Response(body, {
+    return new Response(upstream.body, {
       status: 200,
       headers: {
-        "Content-Type": "image/webp",
-        ...(size > 0 ? { "Content-Length": String(size) } : {}),
+        "Content-Type": contentType,
+        ...(contentLength ? { "Content-Length": contentLength } : {}),
         "Content-Disposition": `${disposition}; filename="${filename}"`,
         "Cache-Control": "private, no-store, max-age=0",
         "X-Content-Type-Options": "nosniff",
-        "X-Pixora-Download-Limit": "15 MB",
+        "X-Pixora-Original-Result": "true",
       },
     });
   } catch (error) {
-    console.error("Pixora compressed result download failed", error);
+    console.error("Pixora original result download failed", error);
     return Response.json(
-      { error: error instanceof Error ? error.message : "Could not prepare compressed download." },
+      { error: error instanceof Error ? error.message : "Image download request failed." },
       { status: 502 },
     );
   }
