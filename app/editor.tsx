@@ -2,14 +2,15 @@
 
 import { ChangeEvent, DragEvent, useEffect, useMemo, useRef, useState } from "react";
 import { upload } from "@vercel/blob/client";
-import { probeDownloadSizes, streamZipToDisk, supportsStreamingZip } from "../lib/stream-zip-client";
+import { streamZipToDisk, supportsStreamingZip } from "../lib/stream-zip-client";
 
 const ratios = ["default", "1:1", "3:2", "2:3", "9:16", "16:9", "3:4", "4:3"];
 const MAX_BATCH = 50;
 const MAX_FILE_BYTES = 12 * 1024 * 1024;
-const BATCH_PIPELINE_CONCURRENCY = 4;
+const BATCH_PIPELINE_CONCURRENCY = 8;
+const BATCH_UPLOAD_CONCURRENCY = 2;
 const HISTORY_TTL_MS = 60 * 60 * 1000;
-const APP_VERSION = "1.5.2";
+const APP_VERSION = "1.5.3";
 const APP_VERSION_KEY = "pixora-app-version";
 
 type Mode = "single" | "batch" | "reference";
@@ -526,8 +527,8 @@ export default function Editor() {
   }
 
   function pumpBatchUploads() {
-    // One upload at a time keeps large 50-image selections within mobile browser memory limits.
-    while (activeBatchUploadsRef.current < 1 && batchUploadQueueRef.current.length) {
+    // Keep uploads bounded, but allow two source transfers so AI task submission is not starved.
+    while (activeBatchUploadsRef.current < BATCH_UPLOAD_CONCURRENCY && batchUploadQueueRef.current.length) {
       batchUploadQueueRef.current.shift()?.();
     }
   }
@@ -942,34 +943,11 @@ export default function Editor() {
   }
 
   async function prepareNativeDownload(url: string, filename: string) {
-    const target = originalDownloadUrl(url, filename, "attachment");
-    const parsed = new URL(target, window.location.origin);
-
-    if (parsed.pathname === "/api/result") {
-      const response = await fetch(target, {
-        method: "POST",
-        cache: "no-store",
-      });
-      const data = await response.json().catch(() => ({})) as {
-        ready?: boolean;
-        size?: number;
-        downloadUrl?: string;
-        error?: string;
-      };
-      if (!response.ok || !data.ready || !data.downloadUrl) {
-        throw new Error(data.error || "Download could not be prepared.");
-      }
-      return {
-        url: data.downloadUrl,
-        size: typeof data.size === "number" ? data.size : 0,
-      };
-    }
-
-    const response = await fetch(target, { method: "HEAD", cache: "no-store" });
-    if (!response.ok) throw new Error("Download could not be prepared.");
+    // Downloads are now true pass-throughs. Do not prefetch, recompress, resize,
+    // or buffer the generated file before handing it to the browser.
     return {
-      url: target,
-      size: Number(response.headers.get("content-length") || 0),
+      url: originalDownloadUrl(url, filename, "attachment"),
+      size: 0,
     };
   }
 
@@ -985,11 +963,11 @@ export default function Editor() {
   }
 
   async function downloadOne(url: string, index = 1) {
-    const filename = `Pixora-${uniqueDownloadNumber()}.webp`;
+    const filename = `Pixora-${uniqueDownloadNumber()}.png`;
     try {
       setDownloadProgress({
         percent: 5,
-        label: "Preparing download · compressing to maximum 15 MB…",
+        label: "Starting original-quality download…",
         state: "working",
       });
 
@@ -1034,7 +1012,7 @@ export default function Editor() {
 
       const sources = sourceUrls.map((url, index) => ({
         url,
-        filename: `Pixora-${batchId}-${String(index + 1).padStart(3, "0")}.webp`,
+        filename: `Pixora-${batchId}-${String(index + 1).padStart(3, "0")}.png`,
       }));
 
       setDownloadProgress({
@@ -1052,7 +1030,7 @@ export default function Editor() {
           if (progress.phase === "preparing") {
             setDownloadProgress({
               percent: progress.percent,
-              label: `Preparing ≤15 MB files · ${progress.filesDone}/${progress.totalFiles}`,
+              label: `Checking original files · ${progress.filesDone}/${progress.totalFiles}`,
               state: "working",
             });
             return;
@@ -1068,7 +1046,6 @@ export default function Editor() {
             state: "working",
           });
         },
-        async (source) => prepareNativeDownload(source.url, source.filename),
       );
 
       setDownloadedUrls((current) => Array.from(new Set([...current, ...urls])));
@@ -1076,22 +1053,17 @@ export default function Editor() {
       return;
     }
 
-    const sizes = await probeDownloadSizes(sourceUrls);
-    const totalBytes = sizes.reduce((sum, size) => sum + size, 0);
-
     if (kind === "separate") {
       setDownloadProgress({
         percent: 5,
-        label: totalBytes > 0
-          ? `Sending ${urls.length} compressed images · ${formatBytes(totalBytes)} total to browser downloads…`
-          : `Sending ${urls.length} compressed images to browser downloads…`,
+        label: `Sending ${urls.length} original-quality images to browser downloads…`,
         state: "working",
       });
       for (let index = 0; index < urls.length; index++) {
-        const filename = `Pixora-${uniqueDownloadNumber()}.webp`;
+        const filename = `Pixora-${uniqueDownloadNumber()}.png`;
         setDownloadProgress({
           percent: 5 + ((index / Math.max(1, urls.length)) * 90),
-          label: `Preparing image ${index + 1} of ${urls.length}…`,
+          label: `Starting image ${index + 1} of ${urls.length}…`,
           state: "working",
         });
         const prepared = await prepareNativeDownload(urls[index], filename);
@@ -1101,9 +1073,7 @@ export default function Editor() {
       }
       setDownloadProgress({
         percent: 100,
-        label: totalBytes > 0
-          ? `${urls.length} browser downloads started · ${formatBytes(totalBytes)} total`
-          : `${urls.length} browser downloads started`,
+        label: `${urls.length} original downloads started`,
         state: "done",
       });
       return;
