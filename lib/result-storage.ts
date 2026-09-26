@@ -177,6 +177,26 @@ export async function resolvePackedVModelResult(packedId: string) {
   }
 
   const allContexts = await getAllVModelTokenContexts();
+
+  // A result may already have been rescued under a different currently saved
+  // key. Search those persistent folders before calling VModel again.
+  for (const context of allContexts) {
+    if (context.fingerprint === unpacked.fingerprint) continue;
+    const stored = await findStoredVModelResult(
+      unpacked.taskId,
+      context.fingerprint,
+    );
+    if (stored) {
+      return {
+        ...stored,
+        taskId: unpacked.taskId,
+        fingerprint: context.fingerprint,
+        token: context.token,
+        persisted: true,
+      };
+    }
+  }
+
   const exactToken = unpacked.fingerprint
     ? await getVModelTokenByFingerprint(unpacked.fingerprint)
     : await getVModelToken();
