@@ -109,9 +109,9 @@ function u32(value: number) {
   return out;
 }
 
-function u64(value: bigint) {
+function u64(value: number) {
   const out = new Uint8Array(8);
-  new DataView(out.buffer).setBigUint64(0, value, true);
+  new DataView(out.buffer).setBigUint64(0, BigInt(Math.floor(value)), true);
   return out;
 }
 
@@ -191,9 +191,9 @@ function centralHeader(
   dosDate: number,
   crc: number,
   size: number,
-  localOffset: bigint,
+  localOffset: number,
 ) {
-  const needsZip64Offset = localOffset > 0xffffffffn;
+  const needsZip64Offset = localOffset > 0xffffffff;
   const extra = needsZip64Offset
     ? concat([u16(0x0001), u16(8), u64(localOffset)])
     : new Uint8Array(0);
@@ -215,7 +215,7 @@ function centralHeader(
     u16(0),
     u16(0),
     u32(0),
-    u32(needsZip64Offset ? 0xffffffff : Number(localOffset)),
+    u32(needsZip64Offset ? 0xffffffff : localOffset),
     name,
     extra,
   ]);
@@ -223,24 +223,24 @@ function centralHeader(
 
 function zip64EndOfCentralDirectory(
   entries: number,
-  centralSize: bigint,
-  centralOffset: bigint,
+  centralSize: number,
+  centralOffset: number,
 ) {
   return concat([
     u32(0x06064b50),
-    u64(44n),
+    u64(44),
     u16(45),
     u16(45),
     u32(0),
     u32(0),
-    u64(BigInt(entries)),
-    u64(BigInt(entries)),
+    u64(entries),
+    u64(entries),
     u64(centralSize),
     u64(centralOffset),
   ]);
 }
 
-function zip64Locator(zip64Offset: bigint) {
+function zip64Locator(zip64Offset: number) {
   return concat([
     u32(0x07064b50),
     u32(0),
@@ -251,8 +251,8 @@ function zip64Locator(zip64Offset: bigint) {
 
 function endOfCentralDirectory(
   entries: number,
-  centralSize: bigint,
-  centralOffset: bigint,
+  centralSize: number,
+  centralOffset: number,
   zip64: boolean,
 ) {
   return concat([
@@ -261,8 +261,8 @@ function endOfCentralDirectory(
     u16(0),
     u16(zip64 ? 0xffff : entries),
     u16(zip64 ? 0xffff : entries),
-    u32(zip64 ? 0xffffffff : Number(centralSize)),
-    u32(zip64 ? 0xffffffff : Number(centralOffset)),
+    u32(zip64 ? 0xffffffff : centralSize),
+    u32(zip64 ? 0xffffffff : centralOffset),
     u16(0),
   ]);
 }
@@ -272,7 +272,7 @@ async function buildZip(
   sources: ZipSource[],
   signal: AbortSignal,
 ) {
-  let offset = 0n;
+  let offset = 0;
   const central: Uint8Array[] = [];
   const encoder = new TextEncoder();
 
@@ -300,7 +300,7 @@ async function buildZip(
       const localOffset = offset;
       const header = localHeader(name, dosTime, dosDate);
       await writer.write(header);
-      offset += BigInt(header.length);
+      offset += header.length;
 
       const reader = response.body.getReader();
       let crc = 0xffffffff;
@@ -319,13 +319,13 @@ async function buildZip(
 
         crc = crc32Update(crc, value);
         await writer.write(value);
-        offset += BigInt(value.length);
+        offset += value.length;
       }
 
       crc = (crc ^ 0xffffffff) >>> 0;
       const descriptor = dataDescriptor(crc, size);
       await writer.write(descriptor);
-      offset += BigInt(descriptor.length);
+      offset += descriptor.length;
 
       central.push(
         centralHeader(name, dosTime, dosDate, crc, size, localOffset),
@@ -335,13 +335,13 @@ async function buildZip(
     const centralOffset = offset;
     for (const record of central) {
       await writer.write(record);
-      offset += BigInt(record.length);
+      offset += record.length;
     }
 
     const centralSize = offset - centralOffset;
     const needsZip64 =
-      centralOffset > 0xffffffffn ||
-      centralSize > 0xffffffffn ||
+      centralOffset > 0xffffffff ||
+      centralSize > 0xffffffff ||
       sources.length > 0xffff;
 
     if (needsZip64) {
@@ -352,11 +352,11 @@ async function buildZip(
         centralOffset,
       );
       await writer.write(zip64End);
-      offset += BigInt(zip64End.length);
+      offset += zip64End.length;
 
       const locator = zip64Locator(zip64Offset);
       await writer.write(locator);
-      offset += BigInt(locator.length);
+      offset += locator.length;
     }
 
     await writer.write(
