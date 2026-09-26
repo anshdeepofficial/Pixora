@@ -177,29 +177,10 @@ export async function resolvePackedVModelResult(packedId: string) {
   }
 
   const allContexts = await getAllVModelTokenContexts();
-
-  // A result may already have been rescued under a different currently saved
-  // key. Search those persistent folders before calling VModel again.
-  for (const context of allContexts) {
-    if (context.fingerprint === unpacked.fingerprint) continue;
-    const stored = await findStoredVModelResult(
-      unpacked.taskId,
-      context.fingerprint,
-    );
-    if (stored) {
-      return {
-        ...stored,
-        taskId: unpacked.taskId,
-        fingerprint: context.fingerprint,
-        token: context.token,
-        persisted: true,
-      };
-    }
-  }
-
   const exactToken = unpacked.fingerprint
     ? await getVModelTokenByFingerprint(unpacked.fingerprint)
-    : await getVModelToken();
+    : null;
+  const currentToken = await getVModelToken();
 
   const candidates: Array<{ token: string; fingerprint: string }> = [];
   if (exactToken) {
@@ -207,6 +188,15 @@ export async function resolvePackedVModelResult(packedId: string) {
       token: exactToken,
       fingerprint: unpacked.fingerprint || vModelTokenFingerprint(exactToken),
     });
+  }
+  if (currentToken) {
+    const currentFingerprint = vModelTokenFingerprint(currentToken);
+    if (!candidates.some((item) => item.fingerprint === currentFingerprint)) {
+      candidates.push({
+        token: currentToken,
+        fingerprint: currentFingerprint,
+      });
+    }
   }
 
   for (const context of allContexts) {
@@ -226,16 +216,20 @@ export async function resolvePackedVModelResult(packedId: string) {
       );
       if (!output) continue;
 
+      // Save recovered output under the historical fingerprint when present.
+      // The next retry can then resolve from ImageKit without any VModel key.
+      const storageFingerprint =
+        unpacked.fingerprint || candidate.fingerprint;
       const stored = await persistKnownVModelResult(
         output,
         unpacked.taskId,
-        candidate.fingerprint,
+        storageFingerprint,
       );
 
       return {
         ...stored,
         taskId: unpacked.taskId,
-        fingerprint: candidate.fingerprint,
+        fingerprint: storageFingerprint,
         token: candidate.token,
       };
     } catch {
