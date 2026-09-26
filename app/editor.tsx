@@ -2,7 +2,6 @@
 
 import { ChangeEvent, DragEvent, useEffect, useMemo, useRef, useState } from "react";
 import { upload } from "@vercel/blob/client";
-import { streamZipToDisk, supportsStreamingZip } from "../lib/stream-zip-client";
 
 const ratios = ["default", "1:1", "3:2", "2:3", "9:16", "16:9", "3:4", "4:3"];
 const MAX_BATCH = 50;
@@ -10,7 +9,7 @@ const MAX_FILE_BYTES = 12 * 1024 * 1024;
 const BATCH_PIPELINE_CONCURRENCY = 8;
 const BATCH_UPLOAD_CONCURRENCY = 2;
 const HISTORY_TTL_MS = 60 * 60 * 1000;
-const APP_VERSION = "1.5.3";
+const APP_VERSION = "1.5.4";
 const APP_VERSION_KEY = "pixora-app-version";
 
 type Mode = "single" | "batch" | "reference";
@@ -925,12 +924,33 @@ export default function Editor() {
     disposition: "attachment" | "inline" = "attachment",
   ) {
     try {
-      // Keep task-aware Pixora result links same-origin and SSR-safe.
       const parsed = new URL(url, "https://pixora.local");
+
+      // Legacy task-aware results are resolved server-side once, then the
+      // browser is handed a persistent CDN URL instead of streaming via Vercel.
       if (parsed.pathname === "/api/result") {
         if (filename) parsed.searchParams.set("filename", filename);
         parsed.searchParams.set("disposition", disposition);
         return `${parsed.pathname}?${parsed.searchParams.toString()}`;
+      }
+
+      // Current results already live on ImageKit. Download them directly from
+      // the CDN so huge 4K files never pass through a Pixora server function.
+      if (parsed.hostname.endsWith("imagekit.io")) {
+        parsed.searchParams.set("tr", "orig-true");
+        if (disposition === "attachment") {
+          parsed.searchParams.set("ik-attachment", "true");
+          if (filename) {
+            parsed.searchParams.set(
+              "ik-attachment-filename",
+              filename.replace(/\.[a-zA-Z0-9]{2,5}$/i, "").replace(/[^a-zA-Z0-9._-]/g, "-").slice(0, 100),
+            );
+          }
+        } else {
+          parsed.searchParams.delete("ik-attachment");
+          parsed.searchParams.delete("ik-attachment-filename");
+        }
+        return parsed.toString();
       }
     } catch {}
 
@@ -943,12 +963,30 @@ export default function Editor() {
   }
 
   async function prepareNativeDownload(url: string, filename: string) {
-    // Downloads are now true pass-throughs. Do not prefetch, recompress, resize,
-    // or buffer the generated file before handing it to the browser.
-    return {
-      url: originalDownloadUrl(url, filename, "attachment"),
-      size: 0,
-    };
+    const target = originalDownloadUrl(url, filename, "attachment");
+    const parsed = new URL(target, window.location.origin);
+
+    if (parsed.pathname === "/api/result") {
+      const response = await fetch(target, {
+        method: "POST",
+        cache: "no-store",
+      });
+      const data = await response.json().catch(() => ({})) as {
+        ready?: boolean;
+        size?: number;
+        downloadUrl?: string;
+        error?: string;
+      };
+      if (!response.ok || !data.ready || !data.downloadUrl) {
+        throw new Error(data.error || "Could not resolve the original image.");
+      }
+      return {
+        url: data.downloadUrl,
+        size: typeof data.size === "number" ? data.size : 0,
+      };
+    }
+
+    return { url: target, size: 0 };
   }
 
   function triggerPreparedDownload(downloadUrl: string, filename: string) {
@@ -1003,83 +1041,88 @@ export default function Editor() {
   async function downloadMany(urls: string[], kind: "zip" | "separate") {
     if (!urls.length) return;
     const batchId = uniqueDownloadNumber();
-    const sourceUrls = urls.map((url) => originalDownloadUrl(url, "", "inline"));
 
     if (kind === "zip") {
-      if (!supportsStreamingZip()) {
-        throw new Error("Large ZIP streaming needs Chrome or Edge desktop. Use Separate files in this browser.");
-      }
-
-      const sources = sourceUrls.map((url, index) => ({
-        url,
-        filename: `Pixora-${batchId}-${String(index + 1).padStart(3, "0")}.png`,
-      }));
-
       setDownloadProgress({
-        percent: 1,
-        label: "Choose where to save the ZIP…",
+        percent: 8,
+        label: `Preparing ${urls.length} original images for one ZIP…`,
         state: "working",
       });
 
-      // The native picker must run before any network await so the browser
-      // still recognizes the user's click as active permission.
-      await streamZipToDisk(
-        sources,
-        `Pixora-${batchId}.zip`,
-        (progress) => {
-          if (progress.phase === "preparing") {
-            setDownloadProgress({
-              percent: progress.percent,
-              label: `Checking original files · ${progress.filesDone}/${progress.totalFiles}`,
-              state: "working",
-            });
-            return;
-          }
+      const response = await fetch("/api/zip", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ urls }),
+      });
+      const data = await response.json().catch(() => ({})) as {
+        ready?: boolean;
+        count?: number;
+        downloadUrl?: string;
+        error?: string;
+      };
 
-          const remaining = Math.max(0, progress.totalBytes - progress.loadedBytes);
-          const sizeText = progress.totalBytes > 0
-            ? `${formatBytes(progress.loadedBytes)} / ${formatBytes(progress.totalBytes)} · ${formatBytes(remaining)} remaining`
-            : `${formatBytes(progress.loadedBytes)} written`;
-          setDownloadProgress({
-            percent: Math.max(8, progress.percent),
-            label: `ZIP streaming to disk · ${sizeText} · ${progress.filesDone}/${progress.totalFiles} images`,
-            state: "working",
-          });
-        },
-      );
+      if (!response.ok || !data.ready || !data.downloadUrl) {
+        throw new Error(data.error || "Could not prepare ZIP download.");
+      }
 
+      setDownloadProgress({
+        percent: 95,
+        label: `ZIP ready · ${data.count || urls.length} images · starting download…`,
+        state: "working",
+      });
+
+      triggerPreparedDownload(data.downloadUrl, `Pixora-${batchId}.zip`);
       setDownloadedUrls((current) => Array.from(new Set([...current, ...urls])));
-      setDownloadProgress({ percent: 100, label: "ZIP saved to disk", state: "done" });
-      return;
-    }
-
-    if (kind === "separate") {
-      setDownloadProgress({
-        percent: 5,
-        label: `Sending ${urls.length} original-quality images to browser downloads…`,
-        state: "working",
-      });
-      for (let index = 0; index < urls.length; index++) {
-        const filename = `Pixora-${uniqueDownloadNumber()}.png`;
-        setDownloadProgress({
-          percent: 5 + ((index / Math.max(1, urls.length)) * 90),
-          label: `Starting image ${index + 1} of ${urls.length}…`,
-          state: "working",
-        });
-        const prepared = await prepareNativeDownload(urls[index], filename);
-        triggerPreparedDownload(prepared.url, filename);
-        setDownloadedUrls((current) => current.includes(urls[index]) ? current : [...current, urls[index]]);
-        await new Promise((resolve) => window.setTimeout(resolve, 180));
-      }
       setDownloadProgress({
         percent: 100,
-        label: `${urls.length} original downloads started`,
+        label: "ZIP download started",
         state: "done",
       });
       return;
     }
 
+    if (kind === "separate") {
+      let preparedCount = 0;
+      setDownloadProgress({
+        percent: 5,
+        label: `Resolving ${urls.length} original files on the CDN…`,
+        state: "working",
+      });
 
+      const prepared = await mapLimit(urls, 8, async (url) => {
+        const filename = `Pixora-${uniqueDownloadNumber()}.png`;
+        const item = await prepareNativeDownload(url, filename);
+        preparedCount += 1;
+        setDownloadProgress({
+          percent: 5 + ((preparedCount / Math.max(1, urls.length)) * 70),
+          label: `Resolved ${preparedCount} of ${urls.length} original files…`,
+          state: "working",
+        });
+        return { ...item, sourceUrl: url, filename };
+      });
+
+      setDownloadProgress({
+        percent: 82,
+        label: `Starting ${prepared.length} direct browser downloads…`,
+        state: "working",
+      });
+
+      for (let index = 0; index < prepared.length; index++) {
+        const item = prepared[index];
+        triggerPreparedDownload(item.url, item.filename);
+        setDownloadedUrls((current) =>
+          current.includes(item.sourceUrl) ? current : [...current, item.sourceUrl],
+        );
+        // A tiny gap prevents Chromium from dropping a large burst of anchor clicks.
+        await new Promise((resolve) => window.setTimeout(resolve, 90));
+      }
+
+      setDownloadProgress({
+        percent: 100,
+        label: `${prepared.length} direct downloads started`,
+        state: "done",
+      });
+    }
   }
 
   async function downloadSelected(kind: "zip" | "separate") {
