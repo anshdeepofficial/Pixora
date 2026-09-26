@@ -13,8 +13,7 @@ export const maxDuration = 300;
 
 const ZIP_JOB_FOLDER = "/pixora-zip-jobs";
 const ZIP_JOB_TTL_MS = 60 * 60 * 1000;
-const MAX_ZIP_IMAGES = 500;
-const ZIP_PREP_CONCURRENCY = 10;
+const ZIP_PREP_CONCURRENCY = 20;
 const MAX_CLASSIC_FILE_SIZE = 0xffffffff;
 
 type ZipSource = {
@@ -402,12 +401,6 @@ export async function POST(request: Request) {
   if (!urls.length) {
     return Response.json({ error: "No images selected." }, { status: 400 });
   }
-  if (urls.length > MAX_ZIP_IMAGES) {
-    return Response.json(
-      { error: `Maximum ${MAX_ZIP_IMAGES} images per ZIP.` },
-      { status: 400 },
-    );
-  }
 
   try {
     const prepared = await mapLimit(
@@ -510,8 +503,7 @@ export async function GET(request: Request) {
       !Number.isFinite(createdAt) ||
       createdAt < Date.now() - ZIP_JOB_TTL_MS ||
       !Array.isArray(job.sources) ||
-      !job.sources.length ||
-      job.sources.length > MAX_ZIP_IMAGES
+      !job.sources.length
     ) {
       return Response.json({ error: "ZIP link has expired." }, { status: 410 });
     }
