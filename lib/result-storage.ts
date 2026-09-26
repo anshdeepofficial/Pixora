@@ -4,6 +4,7 @@ import {
   uploadImageKitRemoteFile,
 } from "./imagekit";
 import {
+  getAllVModelTokenContexts,
   getVModelToken,
   getVModelTokenByFingerprint,
   unpackVModelTaskId,
@@ -21,7 +22,9 @@ function extensionFromUrl(value: string) {
     const pathname = new URL(value).pathname;
     const match = pathname.match(/\.([a-zA-Z0-9]{2,5})$/);
     const ext = match?.[1]?.toLowerCase();
-    if (ext && RESULT_EXTENSIONS.includes(ext as (typeof RESULT_EXTENSIONS)[number])) return ext;
+    if (ext && RESULT_EXTENSIONS.includes(ext as (typeof RESULT_EXTENSIONS)[number])) {
+      return ext === "jpeg" ? "jpg" : ext;
+    }
   } catch {}
   return "png";
 }
@@ -58,7 +61,10 @@ export function imageKitAttachmentUrl(url: string, filename: string) {
     parsed.searchParams.set("ik-attachment", "true");
     parsed.searchParams.set(
       "ik-attachment-filename",
-      filename.replace(/\.[a-zA-Z0-9]{2,5}$/i, "").replace(/[^a-zA-Z0-9._-]/g, "-").slice(0, 100) || "Pixora",
+      filename
+        .replace(/\.[a-zA-Z0-9]{2,5}$/i, "")
+        .replace(/[^a-zA-Z0-9._-]/g, "-")
+        .slice(0, 100) || "Pixora",
     );
     return parsed.toString();
   } catch {
@@ -67,10 +73,13 @@ export function imageKitAttachmentUrl(url: string, filename: string) {
 }
 
 export async function findStoredVModelResult(taskId: string, fingerprint: string) {
-  if (!imageKitConfigured()) return null;
+  if (!imageKitConfigured() || !fingerprint) return null;
 
   for (const extension of RESULT_EXTENSIONS) {
-    const asset = await findImageKitAssetByName(resultFolder(fingerprint), `${taskId}.${extension}`);
+    const asset = await findImageKitAssetByName(
+      resultFolder(fingerprint),
+      `${taskId}.${extension}`,
+    );
     if (asset?.url) {
       return {
         url: asset.url,
@@ -88,7 +97,12 @@ export async function persistKnownVModelResult(
   fingerprint: string,
 ) {
   if (!imageKitConfigured()) {
-    return { url: originalOutput, size: 0, extension: extensionFromUrl(originalOutput), persisted: false };
+    return {
+      url: originalOutput,
+      size: 0,
+      extension: extensionFromUrl(originalOutput),
+      persisted: false,
+    };
   }
 
   const existing = await findStoredVModelResult(taskId, fingerprint);
@@ -101,7 +115,37 @@ export async function persistKnownVModelResult(
     resultFolder(fingerprint),
     ["pixora-result", `vmodel-${fingerprint}`],
   );
-  return { url: stored.url, size: 0, extension, persisted: true };
+
+  return {
+    url: stored.url,
+    size: 0,
+    extension,
+    persisted: true,
+  };
+}
+
+async function fetchTaskWithToken(taskId: string, token: string) {
+  const response = await fetch(
+    `https://api.vmodel.ai/api/tasks/v1/get/${encodeURIComponent(taskId)}`,
+    {
+      headers: { Authorization: `Bearer ${token}` },
+      cache: "no-store",
+    },
+  );
+
+  const data = await response.json().catch(() => ({})) as {
+    result?: { status?: string; output?: string[]; error?: string };
+  };
+
+  if (
+    response.ok &&
+    data.result?.status === "succeeded" &&
+    data.result.output?.[0]
+  ) {
+    return data.result.output[0];
+  }
+
+  return null;
 }
 
 export async function resolvePackedVModelResult(packedId: string) {
@@ -114,48 +158,72 @@ export async function resolvePackedVModelResult(packedId: string) {
     throw new Error("Invalid result ID.");
   }
 
-  const token = unpacked.fingerprint
+  // First recover from Pixora's persistent store. This must happen before
+  // requiring the historical VModel key because old keys may have rotated out.
+  if (unpacked.fingerprint) {
+    const stored = await findStoredVModelResult(
+      unpacked.taskId,
+      unpacked.fingerprint,
+    );
+    if (stored) {
+      return {
+        ...stored,
+        taskId: unpacked.taskId,
+        fingerprint: unpacked.fingerprint,
+        token: "",
+        persisted: true,
+      };
+    }
+  }
+
+  const allContexts = await getAllVModelTokenContexts();
+  const exactToken = unpacked.fingerprint
     ? await getVModelTokenByFingerprint(unpacked.fingerprint)
     : await getVModelToken();
-  if (!token) throw new Error("The VModel API key for this result is unavailable.");
 
-  const fingerprint = unpacked.fingerprint || vModelTokenFingerprint(token);
-  const existing = await findStoredVModelResult(unpacked.taskId, fingerprint);
-  if (existing) {
-    return {
-      ...existing,
-      taskId: unpacked.taskId,
-      fingerprint,
-      token,
-      persisted: true,
-    };
+  const candidates: Array<{ token: string; fingerprint: string }> = [];
+  if (exactToken) {
+    candidates.push({
+      token: exactToken,
+      fingerprint: unpacked.fingerprint || vModelTokenFingerprint(exactToken),
+    });
   }
 
-  const response = await fetch(
-    `https://api.vmodel.ai/api/tasks/v1/get/${encodeURIComponent(unpacked.taskId)}`,
-    {
-      headers: { Authorization: `Bearer ${token}` },
-      cache: "no-store",
-    },
-  );
-  const data = await response.json().catch(() => ({})) as {
-    result?: { status?: string; output?: string[]; error?: string };
-  };
-
-  if (!response.ok || data.result?.status !== "succeeded" || !data.result.output?.[0]) {
-    throw new Error(data.result?.error || "The original result is no longer available.");
+  for (const context of allContexts) {
+    if (!candidates.some((item) => item.fingerprint === context.fingerprint)) {
+      candidates.push(context);
+    }
   }
 
-  const stored = await persistKnownVModelResult(
-    data.result.output[0],
-    unpacked.taskId,
-    fingerprint,
-  );
+  // Try every saved key. VModel tasks can remain retrievable after Pixora
+  // rotates to a different key, so a missing historical key should not kill
+  // the user's download session.
+  for (const candidate of candidates) {
+    try {
+      const output = await fetchTaskWithToken(
+        unpacked.taskId,
+        candidate.token,
+      );
+      if (!output) continue;
 
-  return {
-    ...stored,
-    taskId: unpacked.taskId,
-    fingerprint,
-    token,
-  };
+      const stored = await persistKnownVModelResult(
+        output,
+        unpacked.taskId,
+        candidate.fingerprint,
+      );
+
+      return {
+        ...stored,
+        taskId: unpacked.taskId,
+        fingerprint: candidate.fingerprint,
+        token: candidate.token,
+      };
+    } catch {
+      // Try the next saved key.
+    }
+  }
+
+  throw new Error(
+    "This result could not be recovered from the available VModel keys.",
+  );
 }
