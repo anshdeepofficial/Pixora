@@ -300,6 +300,14 @@ export async function getVModelTokenByFingerprint(fingerprint: string) {
   return pool.entries.find((entry) => entry.fingerprint === fingerprint)?.token || null;
 }
 
+export async function getAllVModelTokenContexts() {
+  const pool = await loadPool();
+  return pool.entries.map((entry) => ({
+    token: entry.token,
+    fingerprint: entry.fingerprint,
+  }));
+}
+
 export async function queueVModelToken(token: string) {
   const pool = await loadPool();
   const fingerprint = vModelTokenFingerprint(token);
