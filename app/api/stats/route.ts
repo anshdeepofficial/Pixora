@@ -41,13 +41,14 @@ export async function GET() {
   }
 
   try {
-    const [totalGenerated, creditsLeft, inputsCleanup, resultsCleanup, previewsCleanup, downloadsCleanup] = await Promise.all([
+    const [totalGenerated, creditsLeft, inputsCleanup, resultsCleanup, previewsCleanup, downloadsCleanup, zipJobsCleanup] = await Promise.all([
       countPromise,
       creditsLeftPromise,
       deleteExpiredImageKitFiles("/pixora-inputs/", ONE_HOUR),
       deleteExpiredImageKitFiles("/pixora-results/", ONE_HOUR),
       deleteExpiredImageKitFiles("/pixora-previews/", ONE_HOUR),
       deleteExpiredImageKitFiles("/pixora-downloads/", ONE_HOUR),
+      deleteExpiredImageKitFiles("/pixora-zip-jobs/", ONE_HOUR),
     ]);
 
     return Response.json(
@@ -60,6 +61,7 @@ export async function GET() {
           expiredResults: resultsCleanup.deleted,
           expiredPreviews: previewsCleanup.deleted,
           expiredDownloads: downloadsCleanup.deleted,
+          expiredZipJobs: zipJobsCleanup.deleted,
         },
       },
       { headers: { "Cache-Control": "no-store, max-age=0" } },
