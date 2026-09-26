@@ -9,7 +9,7 @@ const MAX_FILE_BYTES = 12 * 1024 * 1024;
 const BATCH_PIPELINE_CONCURRENCY = 8;
 const BATCH_UPLOAD_CONCURRENCY = 2;
 const HISTORY_TTL_MS = 60 * 60 * 1000;
-const APP_VERSION = "1.5.4";
+const APP_VERSION = "1.5.5";
 const APP_VERSION_KEY = "pixora-app-version";
 
 type Mode = "single" | "batch" | "reference";
@@ -1057,6 +1057,8 @@ export default function Editor() {
       const data = await response.json().catch(() => ({})) as {
         ready?: boolean;
         count?: number;
+        skipped?: number;
+        skippedIndexes?: number[];
         downloadUrl?: string;
         error?: string;
       };
@@ -1065,17 +1067,31 @@ export default function Editor() {
         throw new Error(data.error || "Could not prepare ZIP download.");
       }
 
+      const skipped = Math.max(0, Number(data.skipped || 0));
+      const skippedSet = new Set(
+        (Array.isArray(data.skippedIndexes) ? data.skippedIndexes : [])
+          .map((value) => Number(value) - 1)
+          .filter((value) => Number.isInteger(value) && value >= 0),
+      );
+      const includedUrls = urls.filter((_, index) => !skippedSet.has(index));
+
       setDownloadProgress({
         percent: 95,
-        label: `ZIP ready · ${data.count || urls.length} images · starting download…`,
+        label: skipped > 0
+          ? `ZIP ready · ${data.count || includedUrls.length} included · ${skipped} skipped · starting…`
+          : `ZIP ready · ${data.count || includedUrls.length} images · starting download…`,
         state: "working",
       });
 
       triggerPreparedDownload(data.downloadUrl, `Pixora-${batchId}.zip`);
-      setDownloadedUrls((current) => Array.from(new Set([...current, ...urls])));
+      setDownloadedUrls((current) =>
+        Array.from(new Set([...current, ...includedUrls])),
+      );
       setDownloadProgress({
         percent: 100,
-        label: "ZIP download started",
+        label: skipped > 0
+          ? `ZIP download started · ${data.count || includedUrls.length} recovered · ${skipped} skipped`
+          : "ZIP download started",
         state: "done",
       });
       return;
@@ -1089,21 +1105,41 @@ export default function Editor() {
         state: "working",
       });
 
-      const prepared = await mapLimit(urls, 8, async (url) => {
+      const attempted = await mapLimit(urls, 8, async (url) => {
         const filename = `Pixora-${uniqueDownloadNumber()}.png`;
-        const item = await prepareNativeDownload(url, filename);
-        preparedCount += 1;
-        setDownloadProgress({
-          percent: 5 + ((preparedCount / Math.max(1, urls.length)) * 70),
-          label: `Resolved ${preparedCount} of ${urls.length} original files…`,
-          state: "working",
-        });
-        return { ...item, sourceUrl: url, filename };
+        try {
+          const item = await prepareNativeDownload(url, filename);
+          return { ok: true as const, ...item, sourceUrl: url, filename };
+        } catch (error) {
+          return {
+            ok: false as const,
+            sourceUrl: url,
+            error: error instanceof Error ? error.message : "Result unavailable",
+          };
+        } finally {
+          preparedCount += 1;
+          setDownloadProgress({
+            percent: 5 + ((preparedCount / Math.max(1, urls.length)) * 70),
+            label: `Checked ${preparedCount} of ${urls.length} original files…`,
+            state: "working",
+          });
+        }
       });
+
+      const prepared = attempted.filter(
+        (item): item is Extract<(typeof attempted)[number], { ok: true }> => item.ok,
+      );
+      const skipped = attempted.length - prepared.length;
+
+      if (!prepared.length) {
+        throw new Error("None of the selected images could be recovered before they expired.");
+      }
 
       setDownloadProgress({
         percent: 82,
-        label: `Starting ${prepared.length} direct browser downloads…`,
+        label: skipped > 0
+          ? `Starting ${prepared.length} downloads · ${skipped} unavailable images skipped…`
+          : `Starting ${prepared.length} direct browser downloads…`,
         state: "working",
       });
 
@@ -1113,13 +1149,14 @@ export default function Editor() {
         setDownloadedUrls((current) =>
           current.includes(item.sourceUrl) ? current : [...current, item.sourceUrl],
         );
-        // A tiny gap prevents Chromium from dropping a large burst of anchor clicks.
         await new Promise((resolve) => window.setTimeout(resolve, 90));
       }
 
       setDownloadProgress({
         percent: 100,
-        label: `${prepared.length} direct downloads started`,
+        label: skipped > 0
+          ? `${prepared.length} downloads started · ${skipped} skipped`
+          : `${prepared.length} direct downloads started`,
         state: "done",
       });
     }
