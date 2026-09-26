@@ -281,18 +281,25 @@ async function buildZip(
       if (signal.aborted) throw new Error("ZIP download cancelled.");
 
       const source = sources[index];
-      const response = await fetch(source.url, {
-        cache: "no-store",
-        redirect: "follow",
-        signal,
-      });
+      let response: Response;
+      try {
+        response = await fetch(source.url, {
+          cache: "no-store",
+          redirect: "follow",
+          signal,
+        });
+      } catch {
+        continue;
+      }
+
       if (!response.ok || !response.body) {
-        throw new Error(`Could not fetch image ${index + 1} for ZIP (${response.status}).`);
+        continue;
       }
 
       const contentType = (response.headers.get("content-type") || "").toLowerCase();
       if (contentType && !contentType.startsWith("image/")) {
-        throw new Error(`Image ${index + 1} did not return an image file.`);
+        await response.body.cancel().catch(() => undefined);
+        continue;
       }
 
       const name = encoder.encode(source.filename);
@@ -342,12 +349,12 @@ async function buildZip(
     const needsZip64 =
       centralOffset > 0xffffffff ||
       centralSize > 0xffffffff ||
-      sources.length > 0xffff;
+      central.length > 0xffff;
 
     if (needsZip64) {
       const zip64Offset = offset;
       const zip64End = zip64EndOfCentralDirectory(
-        sources.length,
+        central.length,
         centralSize,
         centralOffset,
       );
@@ -361,7 +368,7 @@ async function buildZip(
 
     await writer.write(
       endOfCentralDirectory(
-        sources.length,
+        central.length,
         centralSize,
         centralOffset,
         needsZip64,
@@ -403,11 +410,40 @@ export async function POST(request: Request) {
   }
 
   try {
-    const sources = await mapLimit(
+    const prepared = await mapLimit(
       urls,
       ZIP_PREP_CONCURRENCY,
-      (url, index) => prepareSource(url, request.url, index),
+      async (url, index) => {
+        try {
+          return {
+            ok: true as const,
+            source: await prepareSource(url, request.url, index),
+            index,
+          };
+        } catch (error) {
+          return {
+            ok: false as const,
+            index,
+            error: error instanceof Error ? error.message : "Result unavailable.",
+          };
+        }
+      },
     );
+
+    const sources = prepared
+      .filter((item): item is { ok: true; source: ZipSource; index: number } => item.ok)
+      .map((item) => item.source);
+    const skipped = prepared.filter((item) => !item.ok);
+
+    if (!sources.length) {
+      return Response.json(
+        {
+          error: "None of the selected images could be recovered before they expired.",
+          skipped: skipped.length,
+        },
+        { status: 410 },
+      );
+    }
 
     const id = randomUUID();
     const job: ZipJob = {
@@ -426,6 +462,8 @@ export async function POST(request: Request) {
     return Response.json({
       ready: true,
       count: sources.length,
+      skipped: skipped.length,
+      skippedIndexes: skipped.map((item) => item.index + 1),
       downloadUrl: `/api/zip?id=${encodeURIComponent(id)}`,
     }, {
       headers: { "Cache-Control": "no-store, max-age=0" },
