@@ -144,11 +144,14 @@ export async function persistKnownVModelResult(
   };
 }
 
-async function fetchTaskWithToken(taskId: string, token: string) {
+async function fetchTaskWithToken(taskId: string, token = "") {
+  const headers = new Headers();
+  if (token) headers.set("Authorization", `Bearer ${token}`);
+
   const response = await fetch(
     `https://api.vmodel.ai/api/tasks/v1/get/${encodeURIComponent(taskId)}`,
     {
-      headers: { Authorization: `Bearer ${token}` },
+      headers,
       cache: "no-store",
     },
   );
@@ -263,6 +266,41 @@ export async function resolvePackedVModelResult(
       // Try the next saved key.
     }
   }
+
+  // Some VModel deployments keep completed task metadata readable by task ID
+  // even after the creating API key has rotated. Try that once before giving up.
+  try {
+    const output = await fetchTaskWithToken(unpacked.taskId);
+    if (output) {
+      const storageFingerprint =
+        unpacked.fingerprint || allContexts[0]?.fingerprint || "recovered";
+      try {
+        const stored = await persistKnownVModelResult(
+          output,
+          unpacked.taskId,
+          storageFingerprint,
+        );
+        return {
+          ...stored,
+          taskId: unpacked.taskId,
+          fingerprint: storageFingerprint,
+          token: "",
+          fallbackPreview: false,
+        };
+      } catch {
+        return {
+          url: output,
+          size: 0,
+          extension: extensionFromUrl(output),
+          taskId: unpacked.taskId,
+          fingerprint: storageFingerprint,
+          token: "",
+          persisted: false,
+          fallbackPreview: false,
+        };
+      }
+    }
+  } catch {}
 
   if (options.allowPreviewFallback && imageKitConfigured() && unpacked.fingerprint) {
     const preview = await findImageKitAssetByName(
