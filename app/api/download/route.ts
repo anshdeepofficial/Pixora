@@ -10,13 +10,19 @@ const ALLOWED_HOSTS = [
 ];
 
 function isAllowedImageUrl(imageUrl: URL) {
-  return imageUrl.protocol === "https:" && ALLOWED_HOSTS.some((host) => imageUrl.hostname === host || imageUrl.hostname.endsWith(`.${host}`));
+  return imageUrl.protocol === "https:" &&
+    ALLOWED_HOSTS.some((host) =>
+      imageUrl.hostname === host || imageUrl.hostname.endsWith(`.${host}`)
+    );
 }
 
 function safeFilename(value: string | null, extension: string) {
   const fallback = `pixora-image.${extension}`;
   if (!value) return fallback;
-  const cleaned = value.replace(/[^a-zA-Z0-9._-]/g, "-").replace(/-+/g, "-").slice(0, 100);
+  const cleaned = value
+    .replace(/[^a-zA-Z0-9._-]/g, "-")
+    .replace(/-+/g, "-")
+    .slice(0, 100);
   const base = cleaned.replace(/\.[a-zA-Z0-9]{2,5}$/i, "") || "pixora-image";
   return `${base}.${extension}`;
 }
@@ -38,6 +44,7 @@ function directImageKitUrl(
 ) {
   const parsed = new URL(imageUrl.toString());
   parsed.searchParams.set("tr", "orig-true");
+
   if (disposition === "attachment") {
     parsed.searchParams.set("ik-attachment", "true");
     parsed.searchParams.set(
@@ -48,24 +55,37 @@ function directImageKitUrl(
     parsed.searchParams.delete("ik-attachment");
     parsed.searchParams.delete("ik-attachment-filename");
   }
+
   return parsed.toString();
 }
 
 async function resolveAllowedImage(request: Request) {
   const requestUrl = new URL(request.url);
   const value = requestUrl.searchParams.get("url");
-  if (!value) return { error: Response.json({ error: "Image URL is required." }, { status: 400 }) };
+  if (!value) {
+    return {
+      error: Response.json({ error: "Image URL is required." }, { status: 400 }),
+    };
+  }
 
   let imageUrl: URL;
   try {
     imageUrl = new URL(value);
   } catch {
-    return { error: Response.json({ error: "Invalid image URL." }, { status: 400 }) };
+    return {
+      error: Response.json({ error: "Invalid image URL." }, { status: 400 }),
+    };
   }
 
   if (!isAllowedImageUrl(imageUrl)) {
-    return { error: Response.json({ error: `This image host is not allowed: ${imageUrl.hostname}` }, { status: 403 }) };
+    return {
+      error: Response.json(
+        { error: `This image host is not allowed: ${imageUrl.hostname}` },
+        { status: 403 },
+      ),
+    };
   }
+
   return { requestUrl, imageUrl };
 }
 
@@ -73,17 +93,22 @@ export async function HEAD(request: Request) {
   const resolved = await resolveAllowedImage(request);
   if (resolved.error) return resolved.error;
 
+  const imageUrl = resolved.imageUrl!;
+
   try {
     const upstream = await fetch(imageUrl, {
       method: "HEAD",
       cache: "no-store",
       redirect: "follow",
-      headers: { Accept: "image/avif,image/webp,image/png,image/jpeg,image/*,*/*;q=0.8" },
+      headers: {
+        Accept: "image/avif,image/webp,image/png,image/jpeg,image/*,*/*;q=0.8",
+      },
     });
     if (!upstream.ok) return new Response(null, { status: 502 });
 
     const contentType = upstream.headers.get("content-type") || "image/png";
     const contentLength = upstream.headers.get("content-length");
+
     return new Response(null, {
       status: 200,
       headers: {
@@ -104,36 +129,53 @@ export async function GET(request: Request) {
   if (resolved.error) return resolved.error;
 
   const requestUrl = resolved.requestUrl!;
-  const imageUrl = imageUrl;
-  const disposition = requestUrl.searchParams.get("disposition") === "inline" ? "inline" : "attachment";
+  const imageUrl = resolved.imageUrl!;
+  const disposition =
+    requestUrl.searchParams.get("disposition") === "inline"
+      ? "inline"
+      : "attachment";
 
-  // ImageKit is Pixora's persistent result CDN. Redirect straight to it instead
-  // of proxying large originals through a Vercel function.
   if (imageUrl.hostname.endsWith("imagekit.io")) {
     const extension = extensionFrom("", imageUrl);
-    const filename = safeFilename(requestUrl.searchParams.get("filename"), extension);
-    return Response.redirect(directImageKitUrl(imageUrl, filename, disposition), 307);
+    const filename = safeFilename(
+      requestUrl.searchParams.get("filename"),
+      extension,
+    );
+    return Response.redirect(
+      directImageKitUrl(imageUrl, filename, disposition),
+      307,
+    );
   }
 
   try {
     const upstream = await fetch(imageUrl, {
       cache: "no-store",
       redirect: "follow",
-      headers: { Accept: "image/avif,image/webp,image/png,image/jpeg,image/*,*/*;q=0.8" },
+      headers: {
+        Accept: "image/avif,image/webp,image/png,image/jpeg,image/*,*/*;q=0.8",
+      },
     });
 
     if (!upstream.ok || !upstream.body) {
-      return Response.json({ error: `Image could not be downloaded (${upstream.status}).` }, { status: 502 });
+      return Response.json(
+        { error: `Image could not be downloaded (${upstream.status}).` },
+        { status: 502 },
+      );
     }
 
     const contentType = upstream.headers.get("content-type") || "image/png";
     if (!contentType.toLowerCase().startsWith("image/")) {
-      return Response.json({ error: "The upstream URL did not return an image." }, { status: 502 });
+      return Response.json(
+        { error: "The upstream URL did not return an image." },
+        { status: 502 },
+      );
     }
 
     const extension = extensionFrom(contentType, imageUrl);
-    const filename = safeFilename(requestUrl.searchParams.get("filename"), extension);
-    const disposition = requestUrl.searchParams.get("disposition") === "inline" ? "inline" : "attachment";
+    const filename = safeFilename(
+      requestUrl.searchParams.get("filename"),
+      extension,
+    );
     const contentLength = upstream.headers.get("content-length");
 
     return new Response(upstream.body, {
@@ -150,7 +192,12 @@ export async function GET(request: Request) {
   } catch (error) {
     console.error("Pixora direct download failed", error);
     return Response.json(
-      { error: error instanceof Error ? error.message : "Image download request failed." },
+      {
+        error:
+          error instanceof Error
+            ? error.message
+            : "Image download request failed.",
+      },
       { status: 502 },
     );
   }
