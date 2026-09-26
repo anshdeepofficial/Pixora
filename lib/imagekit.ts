@@ -144,6 +144,25 @@ export async function findImageKitAssetByName(folder: string, name: string) {
 }
 
 
+export async function findImageKitAssetsByName(name: string, limit = 100) {
+  const searchQuery = `name = "${imageKitSearchValue(name)}"`;
+  const params = new URLSearchParams({
+    searchQuery,
+    limit: String(Math.min(1000, Math.max(1, limit))),
+    type: "file",
+  });
+  const response = await imageKitApi(`/files?${params.toString()}`);
+  const data = await response.json().catch(() => []) as ImageKitAsset[] | { message?: string };
+  if (!response.ok || !Array.isArray(data)) {
+    throw new Error(
+      !Array.isArray(data) && data.message
+        ? data.message
+        : `Could not search ImageKit files (${response.status}).`,
+    );
+  }
+  return data;
+}
+
 export async function getImageKitAsset(fileId: string) {
   const response = await imageKitApi(`/files/${encodeURIComponent(fileId)}/details`);
   if (response.status === 404) return null;
