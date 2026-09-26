@@ -31,6 +31,26 @@ function extensionFrom(contentType: string, sourceUrl: URL) {
   return match?.[1]?.toLowerCase() || "png";
 }
 
+function directImageKitUrl(
+  imageUrl: URL,
+  filename: string,
+  disposition: "inline" | "attachment",
+) {
+  const parsed = new URL(imageUrl.toString());
+  parsed.searchParams.set("tr", "orig-true");
+  if (disposition === "attachment") {
+    parsed.searchParams.set("ik-attachment", "true");
+    parsed.searchParams.set(
+      "ik-attachment-filename",
+      filename.replace(/\.[a-zA-Z0-9]{2,5}$/i, ""),
+    );
+  } else {
+    parsed.searchParams.delete("ik-attachment");
+    parsed.searchParams.delete("ik-attachment-filename");
+  }
+  return parsed.toString();
+}
+
 async function resolveAllowedImage(request: Request) {
   const requestUrl = new URL(request.url);
   const value = requestUrl.searchParams.get("url");
@@ -54,7 +74,7 @@ export async function HEAD(request: Request) {
   if (resolved.error) return resolved.error;
 
   try {
-    const upstream = await fetch(resolved.imageUrl!, {
+    const upstream = await fetch(imageUrl, {
       method: "HEAD",
       cache: "no-store",
       redirect: "follow",
@@ -83,8 +103,20 @@ export async function GET(request: Request) {
   const resolved = await resolveAllowedImage(request);
   if (resolved.error) return resolved.error;
 
+  const requestUrl = resolved.requestUrl!;
+  const imageUrl = imageUrl;
+  const disposition = requestUrl.searchParams.get("disposition") === "inline" ? "inline" : "attachment";
+
+  // ImageKit is Pixora's persistent result CDN. Redirect straight to it instead
+  // of proxying large originals through a Vercel function.
+  if (imageUrl.hostname.endsWith("imagekit.io")) {
+    const extension = extensionFrom("", imageUrl);
+    const filename = safeFilename(requestUrl.searchParams.get("filename"), extension);
+    return Response.redirect(directImageKitUrl(imageUrl, filename, disposition), 307);
+  }
+
   try {
-    const upstream = await fetch(resolved.imageUrl!, {
+    const upstream = await fetch(imageUrl, {
       cache: "no-store",
       redirect: "follow",
       headers: { Accept: "image/avif,image/webp,image/png,image/jpeg,image/*,*/*;q=0.8" },
@@ -99,9 +131,9 @@ export async function GET(request: Request) {
       return Response.json({ error: "The upstream URL did not return an image." }, { status: 502 });
     }
 
-    const extension = extensionFrom(contentType, resolved.imageUrl!);
-    const filename = safeFilename(resolved.requestUrl!.searchParams.get("filename"), extension);
-    const disposition = resolved.requestUrl!.searchParams.get("disposition") === "inline" ? "inline" : "attachment";
+    const extension = extensionFrom(contentType, imageUrl);
+    const filename = safeFilename(requestUrl.searchParams.get("filename"), extension);
+    const disposition = requestUrl.searchParams.get("disposition") === "inline" ? "inline" : "attachment";
     const contentLength = upstream.headers.get("content-length");
 
     return new Response(upstream.body, {
