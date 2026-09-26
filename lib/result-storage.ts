@@ -1,12 +1,12 @@
 import {
   findImageKitAssetByName,
+  findImageKitAssetsByName,
   imageKitConfigured,
   uploadImageKitRemoteFile,
 } from "./imagekit";
 import {
   getAllVModelTokenContexts,
   unpackVModelTaskId,
-  vModelTokenFingerprint,
 } from "./vmodel-token";
 
 const RESULT_EXTENSIONS = ["png", "webp", "jpg", "jpeg", "avif"] as const;
@@ -82,10 +82,30 @@ export async function findStoredVModelResult(taskId: string, fingerprint: string
       return {
         url: asset.url,
         size: typeof asset.size === "number" ? asset.size : 0,
-        extension,
+        extension: extension === "jpeg" ? "jpg" : extension,
       };
     }
   }
+  return null;
+}
+
+async function findStoredVModelResultAnywhere(taskId: string) {
+  if (!imageKitConfigured()) return null;
+
+  // Pixora's V-Editor has been configured for PNG originals. Search that exact
+  // filename globally first so old results survive API-key/folder rotation.
+  const pngMatches = await findImageKitAssetsByName(`${taskId}.png`, 100);
+  const png = pngMatches.find((asset) =>
+    Boolean(asset.url && asset.filePath?.startsWith("/pixora-results/"))
+  );
+  if (png?.url) {
+    return {
+      url: png.url,
+      size: typeof png.size === "number" ? png.size : 0,
+      extension: "png",
+    };
+  }
+
   return null;
 }
 
@@ -103,7 +123,9 @@ export async function persistKnownVModelResult(
     };
   }
 
-  const existing = await findStoredVModelResult(taskId, fingerprint);
+  const existing =
+    await findStoredVModelResult(taskId, fingerprint) ||
+    await findStoredVModelResultAnywhere(taskId);
   if (existing) return { ...existing, persisted: true };
 
   const extension = extensionFromUrl(originalOutput);
@@ -142,11 +164,13 @@ async function fetchTaskWithToken(taskId: string, token: string) {
   ) {
     return data.result.output[0];
   }
-
   return null;
 }
 
-export async function resolvePackedVModelResult(packedId: string) {
+export async function resolvePackedVModelResult(
+  packedId: string,
+  options: { allowPreviewFallback?: boolean } = {},
+) {
   if (!packedId || !/^[a-zA-Z0-9_-]{6,180}$/.test(packedId)) {
     throw new Error("Invalid result ID.");
   }
@@ -156,22 +180,35 @@ export async function resolvePackedVModelResult(packedId: string) {
     throw new Error("Invalid result ID.");
   }
 
-  // First recover from Pixora's persistent store. This must happen before
-  // requiring the historical VModel key because old keys may have rotated out.
   if (unpacked.fingerprint) {
-    const stored = await findStoredVModelResult(
+    const exactStored = await findStoredVModelResult(
       unpacked.taskId,
       unpacked.fingerprint,
     );
-    if (stored) {
+    if (exactStored) {
       return {
-        ...stored,
+        ...exactStored,
         taskId: unpacked.taskId,
         fingerprint: unpacked.fingerprint,
         token: "",
         persisted: true,
+        fallbackPreview: false,
       };
     }
+  }
+
+  // Older Pixora versions may have persisted the original under another
+  // fingerprint folder. Recover it globally by task filename.
+  const globallyStored = await findStoredVModelResultAnywhere(unpacked.taskId);
+  if (globallyStored) {
+    return {
+      ...globallyStored,
+      taskId: unpacked.taskId,
+      fingerprint: unpacked.fingerprint,
+      token: "",
+      persisted: true,
+      fallbackPreview: false,
+    };
   }
 
   const allContexts = await getAllVModelTokenContexts();
@@ -181,49 +218,53 @@ export async function resolvePackedVModelResult(packedId: string) {
 
   const candidates: Array<{ token: string; fingerprint: string }> = [];
   if (exactContext) candidates.push(exactContext);
-
   for (const context of allContexts) {
     if (!candidates.some((item) => item.fingerprint === context.fingerprint)) {
       candidates.push(context);
     }
   }
 
-  // Try every saved key. VModel tasks can remain retrievable after Pixora
-  // rotates to a different key, so a missing historical key should not kill
-  // the user's download session.
   for (const candidate of candidates) {
     try {
-      const output = await fetchTaskWithToken(
-        unpacked.taskId,
-        candidate.token,
-      );
+      const output = await fetchTaskWithToken(unpacked.taskId, candidate.token);
       if (!output) continue;
 
-      // Save recovered output under the historical fingerprint when present.
-      // The next retry can then resolve from ImageKit without any VModel key.
       const storageFingerprint =
         unpacked.fingerprint || candidate.fingerprint;
-      const stored = await persistKnownVModelResult(
-        output,
-        unpacked.taskId,
-        storageFingerprint,
-      );
 
-      return {
-        ...stored,
-        taskId: unpacked.taskId,
-        fingerprint: storageFingerprint,
-        token: candidate.token,
-      };
+      try {
+        const stored = await persistKnownVModelResult(
+          output,
+          unpacked.taskId,
+          storageFingerprint,
+        );
+        return {
+          ...stored,
+          taskId: unpacked.taskId,
+          fingerprint: storageFingerprint,
+          token: candidate.token,
+          fallbackPreview: false,
+        };
+      } catch {
+        // Persistence is preferred, but while the VModel URL is still alive
+        // return the untouched original immediately rather than losing it.
+        return {
+          url: output,
+          size: 0,
+          extension: extensionFromUrl(output),
+          taskId: unpacked.taskId,
+          fingerprint: storageFingerprint,
+          token: candidate.token,
+          persisted: false,
+          fallbackPreview: false,
+        };
+      }
     } catch {
       // Try the next saved key.
     }
   }
 
-  // Emergency last resort for expiring sessions: if the full original can no
-  // longer be fetched, use Pixora's already-cached browser preview rather than
-  // losing the image completely.
-  if (imageKitConfigured() && unpacked.fingerprint) {
+  if (options.allowPreviewFallback && imageKitConfigured() && unpacked.fingerprint) {
     const preview = await findImageKitAssetByName(
       `/pixora-previews/${unpacked.fingerprint}`,
       `${unpacked.taskId}.webp`,
@@ -242,7 +283,5 @@ export async function resolvePackedVModelResult(packedId: string) {
     }
   }
 
-  throw new Error(
-    "This result could not be recovered from the available VModel keys.",
-  );
+  throw new Error("The original generated file could not be recovered.");
 }
