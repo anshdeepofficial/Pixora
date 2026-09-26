@@ -5,8 +5,6 @@ import {
 } from "./imagekit";
 import {
   getAllVModelTokenContexts,
-  getVModelToken,
-  getVModelTokenByFingerprint,
   unpackVModelTaskId,
   vModelTokenFingerprint,
 } from "./vmodel-token";
@@ -177,27 +175,12 @@ export async function resolvePackedVModelResult(packedId: string) {
   }
 
   const allContexts = await getAllVModelTokenContexts();
-  const exactToken = unpacked.fingerprint
-    ? await getVModelTokenByFingerprint(unpacked.fingerprint)
+  const exactContext = unpacked.fingerprint
+    ? allContexts.find((item) => item.fingerprint === unpacked.fingerprint)
     : null;
-  const currentToken = await getVModelToken();
 
   const candidates: Array<{ token: string; fingerprint: string }> = [];
-  if (exactToken) {
-    candidates.push({
-      token: exactToken,
-      fingerprint: unpacked.fingerprint || vModelTokenFingerprint(exactToken),
-    });
-  }
-  if (currentToken) {
-    const currentFingerprint = vModelTokenFingerprint(currentToken);
-    if (!candidates.some((item) => item.fingerprint === currentFingerprint)) {
-      candidates.push({
-        token: currentToken,
-        fingerprint: currentFingerprint,
-      });
-    }
-  }
+  if (exactContext) candidates.push(exactContext);
 
   for (const context of allContexts) {
     if (!candidates.some((item) => item.fingerprint === context.fingerprint)) {
@@ -234,6 +217,28 @@ export async function resolvePackedVModelResult(packedId: string) {
       };
     } catch {
       // Try the next saved key.
+    }
+  }
+
+  // Emergency last resort for expiring sessions: if the full original can no
+  // longer be fetched, use Pixora's already-cached browser preview rather than
+  // losing the image completely.
+  if (imageKitConfigured() && unpacked.fingerprint) {
+    const preview = await findImageKitAssetByName(
+      `/pixora-previews/${unpacked.fingerprint}`,
+      `${unpacked.taskId}.webp`,
+    );
+    if (preview?.url) {
+      return {
+        url: preview.url,
+        size: typeof preview.size === "number" ? preview.size : 0,
+        extension: "webp",
+        taskId: unpacked.taskId,
+        fingerprint: unpacked.fingerprint,
+        token: "",
+        persisted: true,
+        fallbackPreview: true,
+      };
     }
   }
 
