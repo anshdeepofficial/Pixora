@@ -8,7 +8,7 @@ export async function GET(request: Request) {
   const packedId = requestUrl.searchParams.get("id") || "";
 
   try {
-    const result = await resolvePackedVModelResult(packedId);
+    const result = await resolvePackedVModelResult(packedId, { allowPreviewFallback: true });
     return Response.redirect(imageKitPreviewUrl(result.url, 1280, 78), 307);
   } catch (error) {
     console.error("Pixora preview route failed", error);
