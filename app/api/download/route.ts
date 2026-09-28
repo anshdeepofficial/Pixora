@@ -9,11 +9,32 @@ const ALLOWED_HOSTS = [
   "imagekit.io",
 ];
 
+function configuredImageKitHost() {
+  const endpoint = process.env.IMAGEKIT_URL_ENDPOINT?.trim();
+  if (!endpoint) return "";
+  try {
+    return new URL(endpoint).hostname.toLowerCase();
+  } catch {
+    return "";
+  }
+}
+
+function isImageKitHost(hostname: string) {
+  const host = hostname.toLowerCase();
+  const configured = configuredImageKitHost();
+  return host === "imagekit.io" ||
+    host.endsWith(".imagekit.io") ||
+    Boolean(configured && host === configured);
+}
+
 function isAllowedImageUrl(imageUrl: URL) {
-  return imageUrl.protocol === "https:" &&
-    ALLOWED_HOSTS.some((host) =>
-      imageUrl.hostname === host || imageUrl.hostname.endsWith(`.${host}`)
-    );
+  if (imageUrl.protocol !== "https:") return false;
+  if (isImageKitHost(imageUrl.hostname)) return true;
+  return ALLOWED_HOSTS.some(
+    (host) =>
+      imageUrl.hostname === host ||
+      imageUrl.hostname.endsWith(`.${host}`),
+  );
 }
 
 function safeFilename(value: string | null, extension: string) {
@@ -23,7 +44,9 @@ function safeFilename(value: string | null, extension: string) {
     .replace(/[^a-zA-Z0-9._-]/g, "-")
     .replace(/-+/g, "-")
     .slice(0, 100);
-  const base = cleaned.replace(/\.[a-zA-Z0-9]{2,5}$/i, "") || "pixora-image";
+  const base =
+    cleaned.replace(/\.[a-zA-Z0-9]{2,5}$/i, "") ||
+    "pixora-image";
   return `${base}.${extension}`;
 }
 
@@ -37,13 +60,18 @@ function extensionFrom(contentType: string, sourceUrl: URL) {
   return match?.[1]?.toLowerCase() || "png";
 }
 
+function originalImageKitUrl(imageUrl: URL) {
+  const parsed = new URL(imageUrl.toString());
+  parsed.searchParams.set("tr", "orig-true");
+  return parsed;
+}
+
 function directImageKitUrl(
   imageUrl: URL,
   filename: string,
   disposition: "inline" | "attachment",
 ) {
-  const parsed = new URL(imageUrl.toString());
-  parsed.searchParams.set("tr", "orig-true");
+  const parsed = originalImageKitUrl(imageUrl);
 
   if (disposition === "attachment") {
     parsed.searchParams.set("ik-attachment", "true");
@@ -64,7 +92,10 @@ async function resolveAllowedImage(request: Request) {
   const value = requestUrl.searchParams.get("url");
   if (!value) {
     return {
-      error: Response.json({ error: "Image URL is required." }, { status: 400 }),
+      error: Response.json(
+        { error: "Image URL is required." },
+        { status: 400 },
+      ),
     };
   }
 
@@ -73,7 +104,10 @@ async function resolveAllowedImage(request: Request) {
     imageUrl = new URL(value);
   } catch {
     return {
-      error: Response.json({ error: "Invalid image URL." }, { status: 400 }),
+      error: Response.json(
+        { error: "Invalid image URL." },
+        { status: 400 },
+      ),
     };
   }
 
@@ -84,6 +118,10 @@ async function resolveAllowedImage(request: Request) {
         { status: 403 },
       ),
     };
+  }
+
+  if (isImageKitHost(imageUrl.hostname)) {
+    imageUrl = originalImageKitUrl(imageUrl);
   }
 
   return { requestUrl, imageUrl };
@@ -101,22 +139,26 @@ export async function HEAD(request: Request) {
       cache: "no-store",
       redirect: "follow",
       headers: {
-        Accept: "image/avif,image/webp,image/png,image/jpeg,image/*,*/*;q=0.8",
+        Accept:
+          "image/avif,image/webp,image/png,image/jpeg,image/*,*/*;q=0.8",
       },
     });
     if (!upstream.ok) return new Response(null, { status: 502 });
 
-    const contentType = upstream.headers.get("content-type") || "image/png";
+    const contentType =
+      upstream.headers.get("content-type") || "image/png";
     const contentLength = upstream.headers.get("content-length");
 
     return new Response(null, {
       status: 200,
       headers: {
         "Content-Type": contentType,
-        ...(contentLength ? { "Content-Length": contentLength } : {}),
+        ...(contentLength
+          ? { "Content-Length": contentLength }
+          : {}),
         "Cache-Control": "private, no-store, max-age=0",
         "X-Content-Type-Options": "nosniff",
-        "X-Pixora-Original-Result": "true",
+        "X-Pixora-Download-Ready": "true",
       },
     });
   } catch {
@@ -134,8 +176,12 @@ export async function GET(request: Request) {
     requestUrl.searchParams.get("disposition") === "inline"
       ? "inline"
       : "attachment";
+  const forceProxy =
+    requestUrl.searchParams.get("proxy") === "1";
 
-  if (imageUrl.hostname.endsWith("imagekit.io")) {
+  // Normal individual downloads go straight from ImageKit CDN to the browser.
+  // ZIP disk-streaming uses proxy=1 so browser CORS cannot break a large batch.
+  if (isImageKitHost(imageUrl.hostname) && !forceProxy) {
     const extension = extensionFrom("", imageUrl);
     const filename = safeFilename(
       requestUrl.searchParams.get("filename"),
@@ -152,18 +198,23 @@ export async function GET(request: Request) {
       cache: "no-store",
       redirect: "follow",
       headers: {
-        Accept: "image/avif,image/webp,image/png,image/jpeg,image/*,*/*;q=0.8",
+        Accept:
+          "image/avif,image/webp,image/png,image/jpeg,image/*,*/*;q=0.8",
       },
     });
 
     if (!upstream.ok || !upstream.body) {
       return Response.json(
-        { error: `Image could not be downloaded (${upstream.status}).` },
+        {
+          error:
+            `Image could not be downloaded (${upstream.status}).`,
+        },
         { status: 502 },
       );
     }
 
-    const contentType = upstream.headers.get("content-type") || "image/png";
+    const contentType =
+      upstream.headers.get("content-type") || "image/png";
     if (!contentType.toLowerCase().startsWith("image/")) {
       return Response.json(
         { error: "The upstream URL did not return an image." },
@@ -176,21 +227,25 @@ export async function GET(request: Request) {
       requestUrl.searchParams.get("filename"),
       extension,
     );
-    const contentLength = upstream.headers.get("content-length");
+    const contentLength =
+      upstream.headers.get("content-length");
 
     return new Response(upstream.body, {
       status: 200,
       headers: {
         "Content-Type": contentType,
-        ...(contentLength ? { "Content-Length": contentLength } : {}),
-        "Content-Disposition": `${disposition}; filename="${filename}"`,
+        ...(contentLength
+          ? { "Content-Length": contentLength }
+          : {}),
+        "Content-Disposition":
+          `${disposition}; filename="${filename}"`,
         "Cache-Control": "private, no-store, max-age=0",
         "X-Content-Type-Options": "nosniff",
         "X-Pixora-Original-Result": "true",
       },
     });
   } catch (error) {
-    console.error("Pixora direct download failed", error);
+    console.error("Pixora download failed", error);
     return Response.json(
       {
         error:
