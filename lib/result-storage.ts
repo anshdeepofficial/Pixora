@@ -2,6 +2,7 @@ import {
   findImageKitAssetByName,
   findImageKitAssetsByName,
   imageKitConfigured,
+  uploadImageKitBinary,
   uploadImageKitRemoteFile,
 } from "./imagekit";
 import {
@@ -25,6 +26,45 @@ function extensionFromUrl(value: string) {
     }
   } catch {}
   return "png";
+}
+
+function extensionFromType(contentType: string, sourceUrl: string) {
+  const type = contentType.toLowerCase();
+  if (type.includes("png")) return "png";
+  if (type.includes("webp")) return "webp";
+  if (type.includes("jpeg") || type.includes("jpg")) return "jpg";
+  if (type.includes("avif")) return "avif";
+  return extensionFromUrl(sourceUrl);
+}
+
+async function fetchOriginalBinary(sourceUrl: string, token = "") {
+  const headers = new Headers({
+    Accept: "image/png,image/jpeg,image/webp,image/avif,image/*,*/*;q=0.8",
+  });
+  if (token) headers.set("Authorization", `Bearer ${token}`);
+
+  const response = await fetch(sourceUrl, {
+    cache: "no-store",
+    redirect: "follow",
+    headers,
+  });
+  if (!response.ok) {
+    throw new Error(`Generated original could not be fetched (${response.status}).`);
+  }
+
+  const contentType = (response.headers.get("content-type") || "image/png").toLowerCase();
+  if (!contentType.startsWith("image/")) {
+    throw new Error("Generated output did not return an image.");
+  }
+
+  const data = await response.arrayBuffer();
+  if (!data.byteLength) throw new Error("Generated original was empty.");
+
+  return {
+    data,
+    contentType,
+    extension: extensionFromType(contentType, sourceUrl),
+  };
 }
 
 export function imageKitOriginalUrl(url: string) {
@@ -113,6 +153,7 @@ export async function persistKnownVModelResult(
   originalOutput: string,
   taskId: string,
   fingerprint: string,
+  token = "",
 ) {
   if (!imageKitConfigured()) {
     return {
@@ -128,12 +169,37 @@ export async function persistKnownVModelResult(
     await findStoredVModelResultAnywhere(taskId);
   if (existing) return { ...existing, persisted: true };
 
+  // Primary path: Pixora itself fetches the completed original while the
+  // VModel task/key is definitely valid, then uploads those exact bytes.
+  // This avoids relying on ImageKit being able to fetch a temporary VModel URL.
+  try {
+    const original = await fetchOriginalBinary(originalOutput, token);
+    const stored = await uploadImageKitBinary(
+      original.data,
+      `${taskId}.${original.extension}`,
+      resultFolder(fingerprint),
+      original.contentType,
+      ["pixora-result", "pixora-original", `vmodel-${fingerprint}`],
+    );
+
+    return {
+      url: stored.url,
+      size: stored.size,
+      extension: original.extension,
+      persisted: true,
+    };
+  } catch (binaryError) {
+    console.error("Pixora binary original persistence failed", binaryError);
+  }
+
+  // Secondary path for public/signed outputs. This avoids throwing away a
+  // completed generation if a runtime cannot buffer the original bytes.
   const extension = extensionFromUrl(originalOutput);
   const stored = await uploadImageKitRemoteFile(
     originalOutput,
     `${taskId}.${extension}`,
     resultFolder(fingerprint),
-    ["pixora-result", `vmodel-${fingerprint}`],
+    ["pixora-result", "pixora-original", `vmodel-${fingerprint}`],
   );
 
   return {
@@ -240,6 +306,7 @@ export async function resolvePackedVModelResult(
           output,
           unpacked.taskId,
           storageFingerprint,
+          candidate.token,
         );
         return {
           ...stored,
@@ -279,6 +346,7 @@ export async function resolvePackedVModelResult(
           output,
           unpacked.taskId,
           storageFingerprint,
+          "",
         );
         return {
           ...stored,
