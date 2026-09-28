@@ -87,6 +87,54 @@ export async function uploadImageKitRemoteFile(
   return { fileId: data.fileId, url: data.url };
 }
 
+export async function uploadImageKitBinary(
+  data: ArrayBuffer,
+  fileName: string,
+  folder: string,
+  contentType = "application/octet-stream",
+  tags: string[] = [],
+) {
+  const body = new FormData();
+  body.set("file", new Blob([data], { type: contentType }), fileName);
+  body.set("fileName", fileName);
+  body.set("folder", folder);
+  body.set("useUniqueFileName", "false");
+  body.set("overwriteFile", "true");
+  if (tags.length) body.set("tags", tags.join(","));
+
+  const response = await fetch(IMAGEKIT_UPLOAD_URL, {
+    method: "POST",
+    headers: {
+      Authorization: basicAuthorization(),
+      Accept: "application/json",
+    },
+    body,
+    cache: "no-store",
+  });
+
+  const result = await response.json().catch(() => ({})) as {
+    fileId?: string;
+    url?: string;
+    size?: number;
+    error?: { message?: string };
+    message?: string;
+  };
+
+  if (!response.ok || !result.fileId || !result.url) {
+    throw new Error(
+      result.error?.message ||
+      result.message ||
+      `ImageKit binary upload failed (${response.status}).`,
+    );
+  }
+
+  return {
+    fileId: result.fileId,
+    url: result.url,
+    size: typeof result.size === "number" ? result.size : data.byteLength,
+  };
+}
+
 export async function uploadImageKitData(
   data: string | Buffer,
   fileName: string,
