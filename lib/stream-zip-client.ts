@@ -5,6 +5,7 @@ export type ZipProgress = {
   totalBytes: number;
   filesDone: number;
   totalFiles: number;
+  skippedFiles: number;
   percent: number;
   phase: "preparing" | "streaming";
 };
@@ -24,11 +25,19 @@ type SavePicker = (options: {
   types?: Array<{ description: string; accept: Record<string, string[]> }>;
 }) => Promise<FileHandleLike>;
 
+type PreparedSource = {
+  url: string;
+  size?: number;
+  skip?: boolean;
+};
+
 const CRC_TABLE = (() => {
   const table = new Uint32Array(256);
   for (let n = 0; n < 256; n++) {
     let c = n;
-    for (let k = 0; k < 8; k++) c = (c & 1) ? (0xedb88320 ^ (c >>> 1)) : (c >>> 1);
+    for (let k = 0; k < 8; k++) {
+      c = (c & 1) ? (0xedb88320 ^ (c >>> 1)) : (c >>> 1);
+    }
     table[n] = c >>> 0;
   }
   return table;
@@ -51,6 +60,12 @@ function u16(value: number) {
 function u32(value: number) {
   const out = new Uint8Array(4);
   new DataView(out.buffer).setUint32(0, value >>> 0, true);
+  return out;
+}
+
+function u64(value: number) {
+  const out = new Uint8Array(8);
+  new DataView(out.buffer).setBigUint64(0, BigInt(Math.floor(value)), true);
   return out;
 }
 
@@ -101,10 +116,15 @@ function centralHeader(
   size: number,
   localOffset: number,
 ) {
+  const zip64Offset = localOffset > 0xffffffff;
+  const extra = zip64Offset
+    ? concat([u16(0x0001), u16(8), u64(localOffset)])
+    : new Uint8Array(0);
+
   return concat([
     u32(0x02014b50),
-    u16(20),
-    u16(20),
+    u16(zip64Offset ? 45 : 20),
+    u16(zip64Offset ? 45 : 20),
     u16(0x0808),
     u16(0),
     u16(dosTime),
@@ -113,32 +133,67 @@ function centralHeader(
     u32(size),
     u32(size),
     u16(name.length),
-    u16(0),
+    u16(extra.length),
     u16(0),
     u16(0),
     u16(0),
     u32(0),
-    u32(localOffset),
+    u32(zip64Offset ? 0xffffffff : localOffset),
     name,
+    extra,
   ]);
 }
 
-function endOfCentralDirectory(entries: number, centralSize: number, centralOffset: number) {
+function zip64End(entries: number, centralSize: number, centralOffset: number) {
+  return concat([
+    u32(0x06064b50),
+    u64(44),
+    u16(45),
+    u16(45),
+    u32(0),
+    u32(0),
+    u64(entries),
+    u64(entries),
+    u64(centralSize),
+    u64(centralOffset),
+  ]);
+}
+
+function zip64Locator(zip64Offset: number) {
+  return concat([
+    u32(0x07064b50),
+    u32(0),
+    u64(zip64Offset),
+    u32(1),
+  ]);
+}
+
+function endOfCentralDirectory(
+  entries: number,
+  centralSize: number,
+  centralOffset: number,
+  zip64: boolean,
+) {
   return concat([
     u32(0x06054b50),
     u16(0),
     u16(0),
-    u16(entries),
-    u16(entries),
-    u32(centralSize),
-    u32(centralOffset),
+    u16(zip64 ? 0xffff : entries),
+    u16(zip64 ? 0xffff : entries),
+    u32(zip64 ? 0xffffffff : centralSize),
+    u32(zip64 ? 0xffffffff : centralOffset),
     u16(0),
   ]);
 }
 
-async function mapLimit<T, R>(items: T[], limit: number, worker: (item: T, index: number) => Promise<R>) {
+async function mapLimit<T, R>(
+  items: T[],
+  limit: number,
+  worker: (item: T, index: number) => Promise<R>,
+) {
   const results = new Array<R>(items.length);
   let cursor = 0;
+
   async function run() {
     while (true) {
       const index = cursor++;
@@ -146,31 +201,16 @@ async function mapLimit<T, R>(items: T[], limit: number, worker: (item: T, index
       results[index] = await worker(items[index], index);
     }
   }
-  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, run));
+
+  await Promise.all(
+    Array.from({ length: Math.min(limit, items.length) }, () => run()),
+  );
   return results;
 }
 
 export function supportsStreamingZip() {
-  return typeof window !== "undefined" && typeof (window as unknown as { showSaveFilePicker?: SavePicker }).showSaveFilePicker === "function";
-}
-
-export async function probeDownloadSizes(
-  urls: string[],
-  onPrepared?: (completed: number, total: number) => void,
-) {
-  let completed = 0;
-  return mapLimit(urls, 6, async (url) => {
-    try {
-      const response = await fetch(url, { method: "HEAD", cache: "no-store" });
-      const size = Number(response.headers.get("content-length") || 0);
-      return response.ok && Number.isFinite(size) && size > 0 ? size : 0;
-    } catch {
-      return 0;
-    } finally {
-      completed += 1;
-      onPrepared?.(completed, urls.length);
-    }
-  });
+  return typeof window !== "undefined" &&
+    typeof (window as unknown as { showSaveFilePicker?: SavePicker }).showSaveFilePicker === "function";
 }
 
 export async function streamZipToDisk(
@@ -180,12 +220,12 @@ export async function streamZipToDisk(
   prepareSource?: (
     source: { url: string; filename: string },
     index: number,
-  ) => Promise<{ url: string; size?: number }>,
+  ) => Promise<PreparedSource>,
 ) {
   const picker = (window as unknown as { showSaveFilePicker?: SavePicker }).showSaveFilePicker;
   if (!picker) throw new Error("Streaming ZIP download is not supported by this browser.");
 
-  // Invoke the native picker immediately while the click still has user activation.
+  // Must be the first awaited UI action so Chrome keeps user activation.
   const handle = await picker({
     suggestedName,
     types: [{ description: "ZIP archive", accept: { "application/zip": [".zip"] } }],
@@ -193,40 +233,47 @@ export async function streamZipToDisk(
   const writable = await handle.createWritable();
 
   try {
-    let preparedSources = sources.map((source) => ({ ...source, size: 0 }));
+    let preparedCount = 0;
+    let skippedFiles = 0;
 
-    if (prepareSource) {
-      let completed = 0;
-      preparedSources = await mapLimit(sources, 4, async (source, index) => {
-        const prepared = await prepareSource(source, index);
-        completed += 1;
+    const prepared = await mapLimit(sources, 8, async (source, index) => {
+      try {
+        const next = prepareSource
+          ? await prepareSource(source, index)
+          : { url: source.url, size: 0 };
+
+        if (next.skip) {
+          skippedFiles += 1;
+          return null;
+        }
+
+        return {
+          ...source,
+          url: next.url,
+          size: typeof next.size === "number" ? next.size : 0,
+        };
+      } catch {
+        skippedFiles += 1;
+        return null;
+      } finally {
+        preparedCount += 1;
         onProgress({
           loadedBytes: 0,
           totalBytes: 0,
-          filesDone: completed,
+          filesDone: preparedCount,
           totalFiles: sources.length,
-          percent: Math.min(8, (completed / Math.max(1, sources.length)) * 8),
+          skippedFiles,
+          percent: Math.min(8, (preparedCount / Math.max(1, sources.length)) * 8),
           phase: "preparing",
         });
-        return {
-          ...source,
-          url: prepared.url,
-          size: typeof prepared.size === "number" ? prepared.size : 0,
-        };
-      });
-    } else {
-      const sizes = await probeDownloadSizes(
-        sources.map((item) => item.url),
-        (completed, total) => onProgress({
-          loadedBytes: 0,
-          totalBytes: 0,
-          filesDone: completed,
-          totalFiles: total,
-          percent: Math.min(8, (completed / Math.max(1, total)) * 8),
-          phase: "preparing",
-        }),
-      );
-      preparedSources = sources.map((source, index) => ({ ...source, size: sizes[index] || 0 }));
+      }
+    });
+
+    const preparedSources = prepared.filter(
+      (item): item is { url: string; filename: string; size: number } => Boolean(item),
+    );
+    if (!preparedSources.length) {
+      throw new Error("None of the selected originals could be prepared for download.");
     }
 
     const totalBytes = preparedSources.reduce((sum, source) => sum + source.size, 0);
@@ -237,8 +284,26 @@ export async function streamZipToDisk(
 
     for (let index = 0; index < preparedSources.length; index++) {
       const source = preparedSources[index];
-      const response = await fetch(source.url, { cache: "no-store" });
-      if (!response.ok || !response.body) throw new Error(`Could not download image ${index + 1}.`);
+
+      let response: Response;
+      try {
+        response = await fetch(source.url, { cache: "no-store" });
+      } catch {
+        skippedFiles += 1;
+        continue;
+      }
+
+      if (!response.ok || !response.body) {
+        skippedFiles += 1;
+        continue;
+      }
+
+      const contentType = (response.headers.get("content-type") || "").toLowerCase();
+      if (contentType && !contentType.startsWith("image/")) {
+        await response.body.cancel().catch(() => undefined);
+        skippedFiles += 1;
+        continue;
+      }
 
       const name = encoder.encode(source.filename);
       const { dosTime, dosDate } = dosDateTime();
@@ -255,41 +320,57 @@ export async function streamZipToDisk(
         const { value, done } = await reader.read();
         if (done) break;
         if (!value?.length) continue;
+
+        size += value.length;
+        if (size > 0xffffffff) {
+          await reader.cancel();
+          throw new Error("A single image is larger than the current 4 GB ZIP entry limit.");
+        }
+
         await writable.write(value);
         crc = crc32Update(crc, value);
-        size += value.length;
         loadedBytes += value.length;
         offset += value.length;
 
-        const percent = totalBytes > 0 ? Math.min(99, (loadedBytes / totalBytes) * 100) : ((index + 0.5) / sources.length) * 100;
+        const percent = totalBytes > 0
+          ? Math.min(99, 8 + ((loadedBytes / totalBytes) * 91))
+          : Math.min(99, 8 + (((index + 0.5) / preparedSources.length) * 91));
+
         onProgress({
           loadedBytes,
           totalBytes,
           filesDone: index,
-          totalFiles: sources.length,
+          totalFiles: preparedSources.length,
+          skippedFiles,
           percent,
           phase: "streaming",
         });
       }
 
       crc = (crc ^ 0xffffffff) >>> 0;
-      if (size > 0xffffffff || localOffset > 0xffffffff) {
-        throw new Error("This ZIP exceeds the 4 GB classic ZIP limit. Download the images separately.");
-      }
-
       const descriptor = dataDescriptor(crc, size);
       await writable.write(descriptor);
       offset += descriptor.length;
-      central.push(centralHeader(name, dosTime, dosDate, crc, size, localOffset));
+
+      central.push(
+        centralHeader(name, dosTime, dosDate, crc, size, localOffset),
+      );
 
       onProgress({
         loadedBytes,
         totalBytes,
-        filesDone: index + 1,
-        totalFiles: sources.length,
-        percent: totalBytes > 0 ? Math.min(99, (loadedBytes / totalBytes) * 100) : ((index + 1) / sources.length) * 100,
+        filesDone: central.length,
+        totalFiles: preparedSources.length,
+        skippedFiles,
+        percent: totalBytes > 0
+          ? Math.min(99, 8 + ((loadedBytes / totalBytes) * 91))
+          : Math.min(99, 8 + (((index + 1) / preparedSources.length) * 91)),
         phase: "streaming",
       });
+    }
+
+    if (!central.length) {
+      throw new Error("No downloadable originals remained after validation.");
     }
 
     const centralOffset = offset;
@@ -298,20 +379,47 @@ export async function streamZipToDisk(
       offset += record.length;
     }
     const centralSize = offset - centralOffset;
-    if (centralOffset > 0xffffffff || centralSize > 0xffffffff) {
-      throw new Error("This ZIP exceeds the 4 GB classic ZIP limit. Download the images separately.");
+
+    const needsZip64 =
+      centralOffset > 0xffffffff ||
+      centralSize > 0xffffffff ||
+      central.length > 0xffff;
+
+    if (needsZip64) {
+      const zip64Offset = offset;
+      const end = zip64End(central.length, centralSize, centralOffset);
+      await writable.write(end);
+      offset += end.length;
+
+      const locator = zip64Locator(zip64Offset);
+      await writable.write(locator);
+      offset += locator.length;
     }
 
-    await writable.write(endOfCentralDirectory(central.length, centralSize, centralOffset));
+    await writable.write(
+      endOfCentralDirectory(
+        central.length,
+        centralSize,
+        centralOffset,
+        needsZip64,
+      ),
+    );
     await writable.close();
+
     onProgress({
       loadedBytes,
       totalBytes,
-      filesDone: sources.length,
-      totalFiles: sources.length,
+      filesDone: central.length,
+      totalFiles: preparedSources.length,
+      skippedFiles,
       percent: 100,
       phase: "streaming",
     });
+
+    return {
+      saved: central.length,
+      skipped: skippedFiles,
+    };
   } catch (error) {
     await writable.abort?.(error).catch(() => undefined);
     throw error;
