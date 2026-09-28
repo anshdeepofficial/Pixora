@@ -2,6 +2,7 @@
 
 import { ChangeEvent, DragEvent, useEffect, useMemo, useRef, useState } from "react";
 import { upload } from "@vercel/blob/client";
+import { streamZipToDisk, supportsStreamingZip } from "../lib/stream-zip-client";
 
 const ratios = ["default", "1:1", "3:2", "2:3", "9:16", "16:9", "3:4", "4:3"];
 const MAX_BATCH = 50;
@@ -9,7 +10,7 @@ const MAX_FILE_BYTES = 12 * 1024 * 1024;
 const BATCH_PIPELINE_CONCURRENCY = 8;
 const BATCH_UPLOAD_CONCURRENCY = 2;
 const HISTORY_TTL_MS = 60 * 60 * 1000;
-const APP_VERSION = "1.5.5";
+const APP_VERSION = "1.5.6";
 const APP_VERSION_KEY = "pixora-app-version";
 
 type Mode = "single" | "batch" | "reference";
@@ -926,31 +927,12 @@ export default function Editor() {
     try {
       const parsed = new URL(url, "https://pixora.local");
 
-      // Legacy task-aware results are resolved server-side once, then the
-      // browser is handed a persistent CDN URL instead of streaming via Vercel.
+      // Legacy task-aware results stay same-origin until Pixora resolves the
+      // original. Everything else goes through one verified download route.
       if (parsed.pathname === "/api/result") {
         if (filename) parsed.searchParams.set("filename", filename);
         parsed.searchParams.set("disposition", disposition);
         return `${parsed.pathname}?${parsed.searchParams.toString()}`;
-      }
-
-      // Current results already live on ImageKit. Download them directly from
-      // the CDN so huge 4K files never pass through a Pixora server function.
-      if (parsed.hostname.endsWith("imagekit.io")) {
-        parsed.searchParams.set("tr", "orig-true");
-        if (disposition === "attachment") {
-          parsed.searchParams.set("ik-attachment", "true");
-          if (filename) {
-            parsed.searchParams.set(
-              "ik-attachment-filename",
-              filename.replace(/\.[a-zA-Z0-9]{2,5}$/i, "").replace(/[^a-zA-Z0-9._-]/g, "-").slice(0, 100),
-            );
-          }
-        } else {
-          parsed.searchParams.delete("ik-attachment");
-          parsed.searchParams.delete("ik-attachment-filename");
-        }
-        return parsed.toString();
       }
     } catch {}
 
@@ -962,10 +944,17 @@ export default function Editor() {
     return `/api/download?${params.toString()}`;
   }
 
-  async function prepareNativeDownload(url: string, filename: string) {
-    const target = originalDownloadUrl(url, filename, "attachment");
-    const parsed = new URL(target, window.location.origin);
+  async function prepareDownloadTarget(
+    url: string,
+    filename: string,
+    disposition: "attachment" | "inline",
+    proxy = false,
+  ) {
+    let target = originalDownloadUrl(url, filename, disposition);
+    let parsed = new URL(target, window.location.origin);
 
+    // Old task-aware history entries are resolved once into their surviving
+    // original, then wrapped back through Pixora's same-origin download route.
     if (parsed.pathname === "/api/result") {
       const response = await fetch(target, {
         method: "POST",
@@ -977,16 +966,42 @@ export default function Editor() {
         downloadUrl?: string;
         error?: string;
       };
+
       if (!response.ok || !data.ready || !data.downloadUrl) {
-        throw new Error(data.error || "Could not resolve the original image.");
+        throw new Error(data.error || "The original image could not be resolved.");
       }
-      return {
-        url: data.downloadUrl,
-        size: typeof data.size === "number" ? data.size : 0,
-      };
+
+      const params = new URLSearchParams({
+        url: originalImageUrl(data.downloadUrl),
+        filename,
+        disposition,
+      });
+      if (proxy) params.set("proxy", "1");
+      target = `/api/download?${params.toString()}`;
+      parsed = new URL(target, window.location.origin);
+    } else if (proxy && parsed.pathname === "/api/download") {
+      parsed.searchParams.set("proxy", "1");
+      target = `${parsed.pathname}?${parsed.searchParams.toString()}`;
     }
 
-    return { url: target, size: 0 };
+    // Verify before handing anything to Chrome. This catches expired/missing
+    // originals while the user's page stays intact instead of opening an error.
+    const head = await fetch(target, {
+      method: "HEAD",
+      cache: "no-store",
+    });
+    if (!head.ok) {
+      throw new Error("The original image is not available for download.");
+    }
+
+    return {
+      url: target,
+      size: Number(head.headers.get("content-length") || 0),
+    };
+  }
+
+  function prepareNativeDownload(url: string, filename: string) {
+    return prepareDownloadTarget(url, filename, "attachment");
   }
 
   function triggerPreparedDownload(downloadUrl: string, filename: string) {
@@ -1004,48 +1019,111 @@ export default function Editor() {
     const filename = `Pixora-${uniqueDownloadNumber()}.png`;
     try {
       setDownloadProgress({
-        percent: 5,
-        label: "Starting original-quality download…",
+        percent: 8,
+        label: "Verifying original image…",
         state: "working",
       });
 
       const prepared = await prepareNativeDownload(url, filename);
       setDownloadProgress({
-        percent: 90,
+        percent: 92,
         label: prepared.size > 0
-          ? `Ready · ${formatBytes(prepared.size)} · starting browser download…`
-          : "Ready · starting browser download…",
+          ? `Original ready · ${formatBytes(prepared.size)} · starting download…`
+          : "Original ready · starting download…",
         state: "working",
       });
 
       triggerPreparedDownload(prepared.url, filename);
-      setDownloadedUrls((current) => current.includes(url) ? current : [...current, url]);
+      setDownloadedUrls((current) =>
+        current.includes(url) ? current : [...current, url],
+      );
       setDownloadNoticeUrl(previewForUrl(url));
       window.setTimeout(() => setDownloadNoticeUrl(""), 1600);
 
       setDownloadProgress({
         percent: 100,
-        label: prepared.size > 0
-          ? `Download started · ${formatBytes(prepared.size)}`
-          : "Download started",
+        label: "Original download started",
         state: "done",
       });
-      window.setTimeout(() => setDownloadProgress({ percent: 0, label: "", state: "idle" }), 2600);
+      window.setTimeout(
+        () => setDownloadProgress({ percent: 0, label: "", state: "idle" }),
+        2600,
+      );
     } catch (error) {
-      const detail = error instanceof Error ? error.message : "Download failed";
+      const detail =
+        error instanceof Error ? error.message : "Download failed";
       setSingleMessage(detail);
-      setDownloadProgress({ percent: 100, label: detail, state: "error" });
+      setDownloadProgress({
+        percent: 100,
+        label: detail,
+        state: "error",
+      });
     }
   }
 
-  async function downloadMany(urls: string[], kind: "zip" | "separate") {
+  async function downloadMany(
+    urls: string[],
+    kind: "zip" | "separate",
+  ) {
     if (!urls.length) return;
     const batchId = uniqueDownloadNumber();
 
     if (kind === "zip") {
+      // Chrome/Edge: stream originals one-by-one straight to the user's disk.
+      // No browser RAM pile-up and no single long-running Vercel ZIP response.
+      if (supportsStreamingZip()) {
+        const sources = urls.map((url, index) => ({
+          url,
+          filename: `Pixora-${batchId}-${String(index + 1).padStart(4, "0")}.png`,
+        }));
+
+        const result = await streamZipToDisk(
+          sources,
+          `Pixora-${batchId}.zip`,
+          (progress) => {
+            const sizeText = progress.totalBytes > 0
+              ? `${formatBytes(progress.loadedBytes)} / ${formatBytes(progress.totalBytes)}`
+              : `${formatBytes(progress.loadedBytes)} written`;
+
+            setDownloadProgress({
+              percent: progress.percent,
+              label: progress.phase === "preparing"
+                ? `Checking originals · ${progress.filesDone}/${progress.totalFiles}${progress.skippedFiles ? ` · ${progress.skippedFiles} unavailable` : ""}`
+                : `Saving ZIP · ${sizeText} · ${progress.filesDone}/${progress.totalFiles}${progress.skippedFiles ? ` · ${progress.skippedFiles} skipped` : ""}`,
+              state: "working",
+            });
+          },
+          async (source) => {
+            const prepared = await prepareDownloadTarget(
+              source.url,
+              source.filename,
+              "inline",
+              true,
+            );
+            return {
+              url: prepared.url,
+              size: prepared.size,
+            };
+          },
+        );
+
+        setDownloadedUrls((current) =>
+          Array.from(new Set([...current, ...urls])),
+        );
+        setDownloadProgress({
+          percent: 100,
+          label: result.skipped > 0
+            ? `ZIP saved · ${result.saved} originals · ${result.skipped} unavailable`
+            : `ZIP saved · ${result.saved} originals`,
+          state: "done",
+        });
+        return;
+      }
+
+      // Fallback for browsers without File System Access API.
       setDownloadProgress({
         percent: 8,
-        label: `Preparing ${urls.length} original images for one ZIP…`,
+        label: `Preparing ${urls.length} originals on the server…`,
         state: "working",
       });
 
@@ -1064,102 +1142,126 @@ export default function Editor() {
       };
 
       if (!response.ok || !data.ready || !data.downloadUrl) {
-        throw new Error(data.error || "Could not prepare ZIP download.");
+        throw new Error(
+          data.error || "Could not prepare ZIP download.",
+        );
       }
 
       const skipped = Math.max(0, Number(data.skipped || 0));
       const skippedSet = new Set(
-        (Array.isArray(data.skippedIndexes) ? data.skippedIndexes : [])
+        (Array.isArray(data.skippedIndexes)
+          ? data.skippedIndexes
+          : [])
           .map((value) => Number(value) - 1)
-          .filter((value) => Number.isInteger(value) && value >= 0),
+          .filter(
+            (value) =>
+              Number.isInteger(value) && value >= 0,
+          ),
       );
-      const includedUrls = urls.filter((_, index) => !skippedSet.has(index));
+      const includedUrls = urls.filter(
+        (_, index) => !skippedSet.has(index),
+      );
 
-      setDownloadProgress({
-        percent: 95,
-        label: skipped > 0
-          ? `ZIP ready · ${data.count || includedUrls.length} included · ${skipped} skipped · starting…`
-          : `ZIP ready · ${data.count || includedUrls.length} images · starting download…`,
-        state: "working",
-      });
-
-      triggerPreparedDownload(data.downloadUrl, `Pixora-${batchId}.zip`);
+      triggerPreparedDownload(
+        data.downloadUrl,
+        `Pixora-${batchId}.zip`,
+      );
       setDownloadedUrls((current) =>
         Array.from(new Set([...current, ...includedUrls])),
       );
       setDownloadProgress({
         percent: 100,
         label: skipped > 0
-          ? `ZIP download started · ${data.count || includedUrls.length} recovered · ${skipped} skipped`
+          ? `ZIP download started · ${data.count || includedUrls.length} originals · ${skipped} skipped`
           : "ZIP download started",
         state: "done",
       });
       return;
     }
 
-    if (kind === "separate") {
-      let preparedCount = 0;
-      setDownloadProgress({
-        percent: 5,
-        label: `Resolving ${urls.length} original files on the CDN…`,
-        state: "working",
-      });
+    let preparedCount = 0;
+    setDownloadProgress({
+      percent: 5,
+      label: `Checking ${urls.length} original files…`,
+      state: "working",
+    });
 
-      const attempted = await mapLimit(urls, 8, async (url) => {
-        const filename = `Pixora-${uniqueDownloadNumber()}.png`;
-        try {
-          const item = await prepareNativeDownload(url, filename);
-          return { ok: true as const, ...item, sourceUrl: url, filename };
-        } catch (error) {
-          return {
-            ok: false as const,
-            sourceUrl: url,
-            error: error instanceof Error ? error.message : "Result unavailable",
-          };
-        } finally {
-          preparedCount += 1;
-          setDownloadProgress({
-            percent: 5 + ((preparedCount / Math.max(1, urls.length)) * 70),
-            label: `Checked ${preparedCount} of ${urls.length} original files…`,
-            state: "working",
-          });
-        }
-      });
+    const attempted = await mapLimit(urls, 8, async (url) => {
+      const filename = `Pixora-${uniqueDownloadNumber()}.png`;
+      try {
+        const item = await prepareNativeDownload(url, filename);
+        return {
+          ok: true as const,
+          ...item,
+          sourceUrl: url,
+          filename,
+        };
+      } catch (error) {
+        return {
+          ok: false as const,
+          sourceUrl: url,
+          error:
+            error instanceof Error
+              ? error.message
+              : "Result unavailable",
+        };
+      } finally {
+        preparedCount += 1;
+        setDownloadProgress({
+          percent:
+            5 +
+            ((preparedCount / Math.max(1, urls.length)) * 70),
+          label:
+            `Checked ${preparedCount} of ${urls.length} originals…`,
+          state: "working",
+        });
+      }
+    });
 
-      const prepared = attempted.filter(
-        (item): item is Extract<(typeof attempted)[number], { ok: true }> => item.ok,
+    const prepared = attempted.filter(
+      (
+        item,
+      ): item is Extract<
+        (typeof attempted)[number],
+        { ok: true }
+      > => item.ok,
+    );
+    const skipped = attempted.length - prepared.length;
+
+    if (!prepared.length) {
+      throw new Error(
+        "None of the selected original images are currently downloadable.",
       );
-      const skipped = attempted.length - prepared.length;
-
-      if (!prepared.length) {
-        throw new Error("None of the selected images could be recovered before they expired.");
-      }
-
-      setDownloadProgress({
-        percent: 82,
-        label: skipped > 0
-          ? `Starting ${prepared.length} downloads · ${skipped} unavailable images skipped…`
-          : `Starting ${prepared.length} direct browser downloads…`,
-        state: "working",
-      });
-
-      for (let index = 0; index < prepared.length; index++) {
-        const item = prepared[index];
-        triggerPreparedDownload(item.url, item.filename);
-        setDownloadedUrls((current) =>
-          current.includes(item.sourceUrl) ? current : [...current, item.sourceUrl],
-        );
-        await new Promise((resolve) => window.setTimeout(resolve, 90));
-      }
-
-      setDownloadProgress({
-        percent: 100,
-        label: skipped > 0
-          ? `${prepared.length} downloads started · ${skipped} skipped`
-          : `${prepared.length} direct downloads started`,
-        state: "done",
-      });
     }
+
+    setDownloadProgress({
+      percent: 82,
+      label: skipped > 0
+        ? `Starting ${prepared.length} downloads · ${skipped} unavailable skipped…`
+        : `Starting ${prepared.length} original downloads…`,
+      state: "working",
+    });
+
+    for (let index = 0; index < prepared.length; index++) {
+      const item = prepared[index];
+      triggerPreparedDownload(item.url, item.filename);
+      setDownloadedUrls((current) =>
+        current.includes(item.sourceUrl)
+          ? current
+          : [...current, item.sourceUrl],
+      );
+      await new Promise((resolve) =>
+        window.setTimeout(resolve, 140),
+      );
+    }
+
+    setDownloadProgress({
+      percent: 100,
+      label: skipped > 0
+        ? `${prepared.length} downloads started · ${skipped} skipped`
+        : `${prepared.length} original downloads started`,
+      state: "done",
+    });
   }
 
   async function downloadSelected(kind: "zip" | "separate") {
