@@ -56,6 +56,7 @@ export async function GET(request: Request) {
         originalOutput,
         unpacked.taskId,
         fingerprint,
+        token,
       );
 
       output = [stored.url, ...data.result.output.slice(1)];
