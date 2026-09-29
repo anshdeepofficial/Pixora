@@ -174,6 +174,7 @@ async function fetchOriginalResponse(sourceUrl: string, token = "") {
   const size = Number(response.headers.get("content-length") || 0);
   return {
     response,
+    body: response.body,
     contentType,
     size: Number.isFinite(size) && size > 0 ? size : 0,
     extension: extensionFromType(contentType, sourceUrl),
@@ -189,7 +190,7 @@ async function persistOriginalToBlob(
   const original = await fetchOriginalResponse(sourceUrl, token);
   const blob = await put(
     `pixora-results/${fingerprint}/${taskId}.${original.extension}`,
-    original.response.body,
+    original.body,
     {
       access: "public",
       addRandomSuffix: false,
@@ -235,7 +236,7 @@ export async function persistKnownVModelResult(
   try {
     const probe = await fetchOriginalResponse(originalOutput, token);
     declaredSize = probe.size;
-    await probe.response.body.cancel().catch(() => undefined);
+    await probe.body.cancel().catch(() => undefined);
   } catch {}
 
   if (declaredSize > IMAGEKIT_SAFE_ORIGINAL_BYTES) {
