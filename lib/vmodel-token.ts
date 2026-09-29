@@ -23,6 +23,12 @@ type TokenPool = {
   activationHistory: string[];
 };
 
+let poolCache: { value: TokenPool; expiresAt: number } | null = null;
+
+function clonePool(pool: TokenPool): TokenPool {
+  return JSON.parse(JSON.stringify(pool)) as TokenPool;
+}
+
 export type VModelApiInfo = {
   fingerprint: string;
   masked: string;
@@ -73,7 +79,17 @@ async function readEncryptedFile(fileName: string) {
   const assets = await privateAssets();
   const asset = assets.find((item) => item.name === fileName || item.filePath === `${TOKEN_FOLDER}/${fileName}`);
   if (!asset?.url) return null;
-  const response = await fetch(asset.url, { cache: "no-store" });
+
+  const url = new URL(asset.url);
+  url.searchParams.set("pixora_pool_v", String(Date.now()));
+
+  const response = await fetch(url, {
+    cache: "no-store",
+    headers: {
+      "Cache-Control": "no-cache, no-store, max-age=0",
+      Pragma: "no-cache",
+    },
+  });
   if (!response.ok) throw new Error(`Could not load ${fileName}.`);
   const payload = await response.json() as { iv: string; tag: string; data: string };
   return decryptText(payload);
@@ -81,7 +97,17 @@ async function readEncryptedFile(fileName: string) {
 
 async function writePool(pool: TokenPool) {
   if (!imageKitConfigured()) throw new Error("ImageKit storage is not configured.");
-  await uploadImageKitData(encryptText(JSON.stringify(pool)), POOL_FILE, TOKEN_FOLDER, "application/octet-stream");
+  const normalized = normalisePool(clonePool(pool));
+  await uploadImageKitData(
+    encryptText(JSON.stringify(normalized)),
+    POOL_FILE,
+    TOKEN_FOLDER,
+    "application/octet-stream",
+  );
+  poolCache = {
+    value: clonePool(normalized),
+    expiresAt: Date.now() + 60_000,
+  };
 }
 
 function normalisePool(pool: TokenPool) {
@@ -140,6 +166,10 @@ async function migratePool() {
 }
 
 async function loadPool() {
+  if (poolCache && poolCache.expiresAt > Date.now()) {
+    return normalisePool(clonePool(poolCache.value));
+  }
+
   if (!imageKitConfigured()) {
     const envToken = process.env.VMODEL_API_TOKEN?.trim() || "";
     const entry = envToken ? {
@@ -170,7 +200,11 @@ async function loadPool() {
       await writePool(pool);
     }
   }
-  return pool;
+  poolCache = {
+    value: clonePool(pool),
+    expiresAt: Date.now() + 15_000,
+  };
+  return clonePool(pool);
 }
 
 async function generationCount(entry: TokenEntry) {
