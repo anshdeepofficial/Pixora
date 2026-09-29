@@ -8,6 +8,10 @@ import {
   imageKitOriginalUrl,
   resolvePackedVModelResult,
 } from "../../../lib/result-storage";
+import {
+  fetchVModelAsset,
+  fetchVModelTask,
+} from "../../../lib/vmodel-request";
 
 function safeFilename(value: string | null, extension: string) {
   const fallback = `Pixora-${Date.now()}.${extension}`;
@@ -50,16 +54,10 @@ async function liveResult(packedId: string) {
 
   for (const candidate of candidates) {
     try {
-      const response = await fetch(
-        `https://api.vmodel.ai/api/tasks/v1/get/${encodeURIComponent(unpacked.taskId)}`,
-        {
-          headers: { Authorization: `Bearer ${candidate.token}` },
-          cache: "no-store",
-        },
+      const { response, data } = await fetchVModelTask(
+        unpacked.taskId,
+        candidate.token,
       );
-      const data = await response.json().catch(() => ({})) as {
-        result?: { status?: string; output?: string[] };
-      };
 
       if (response.ok && data.result?.status === "succeeded" && data.result.output?.[0]) {
         return {
@@ -108,17 +106,11 @@ async function resolveResult(request: Request) {
 }
 
 async function fetchOriginal(url: string, token = "", method: "GET" | "HEAD" = "GET") {
-  const headers = new Headers({
-    Accept: "image/png,image/jpeg,image/webp,image/avif,image/*,*/*;q=0.8",
-  });
-  if (token) headers.set("Authorization", `Bearer ${token}`);
-
-  return fetch(url, {
-    method,
-    headers,
-    cache: "no-store",
-    redirect: "follow",
-  });
+  return fetchVModelAsset(
+    url,
+    token,
+    { method },
+  );
 }
 
 export async function HEAD(request: Request) {
