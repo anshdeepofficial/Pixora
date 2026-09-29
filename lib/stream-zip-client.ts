@@ -27,7 +27,6 @@ type SavePicker = (options: {
 
 type PreparedSource = {
   url: string;
-  fallbackUrl?: string;
   size?: number;
   skip?: boolean;
 };
@@ -251,7 +250,6 @@ export async function streamZipToDisk(
         return {
           ...source,
           url: next.url,
-          fallbackUrl: next.fallbackUrl,
           size: typeof next.size === "number" ? next.size : 0,
         };
       } catch {
@@ -272,7 +270,7 @@ export async function streamZipToDisk(
     });
 
     const preparedSources = prepared.filter(
-      (item): item is { url: string; fallbackUrl?: string; filename: string; size: number } => Boolean(item),
+      (item): item is { url: string; filename: string; size: number } => Boolean(item),
     );
     if (!preparedSources.length) {
       throw new Error("None of the selected originals could be prepared for download.");
@@ -287,34 +285,22 @@ export async function streamZipToDisk(
     for (let index = 0; index < preparedSources.length; index++) {
       const source = preparedSources[index];
 
-      let response: Response | null = null;
-
-      // Fast path: follow the verified download route to the storage CDN so
-      // the bytes do not pass through Vercel. If browser CORS blocks that CDN,
-      // retry only that file through the same-origin proxy.
+      let response: Response;
       try {
-        const direct = await fetch(source.url, { cache: "no-store" });
-        const directType = (direct.headers.get("content-type") || "").toLowerCase();
-        if (direct.ok && direct.body && (!directType || directType.startsWith("image/"))) {
-          response = direct;
-        } else {
-          await direct.body?.cancel().catch(() => undefined);
-        }
-      } catch {}
-
-      if (!response && source.fallbackUrl) {
-        try {
-          const fallback = await fetch(source.fallbackUrl, { cache: "no-store" });
-          const fallbackType = (fallback.headers.get("content-type") || "").toLowerCase();
-          if (fallback.ok && fallback.body && (!fallbackType || fallbackType.startsWith("image/"))) {
-            response = fallback;
-          } else {
-            await fallback.body?.cancel().catch(() => undefined);
-          }
-        } catch {}
+        response = await fetch(source.url, { cache: "no-store" });
+      } catch {
+        skippedFiles += 1;
+        continue;
       }
 
-      if (!response?.body) {
+      if (!response.ok || !response.body) {
+        skippedFiles += 1;
+        continue;
+      }
+
+      const contentType = (response.headers.get("content-type") || "").toLowerCase();
+      if (contentType && !contentType.startsWith("image/")) {
+        await response.body.cancel().catch(() => undefined);
         skippedFiles += 1;
         continue;
       }
