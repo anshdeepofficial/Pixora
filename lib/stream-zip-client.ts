@@ -285,22 +285,33 @@ export async function streamZipToDisk(
     for (let index = 0; index < preparedSources.length; index++) {
       const source = preparedSources[index];
 
-      let response: Response;
-      try {
-        response = await fetch(source.url, { cache: "no-store" });
-      } catch {
-        skippedFiles += 1;
-        continue;
+      const fetchImage = async (value: string) => {
+        try {
+          const candidate = await fetch(value, { cache: "no-store" });
+          const type = (candidate.headers.get("content-type") || "").toLowerCase();
+          if (candidate.ok && candidate.body && (!type || type.startsWith("image/"))) {
+            return candidate;
+          }
+          await candidate.body?.cancel().catch(() => undefined);
+        } catch {}
+        return null;
+      };
+
+      let response = await fetchImage(source.url);
+
+      // Direct ImageKit/CDN delivery is fastest. If the browser blocks a
+      // redirected CDN response, retry only that image through Pixora.
+      if (!response) {
+        try {
+          const fallback = new URL(source.url, window.location.origin);
+          if (fallback.pathname === "/api/download" && fallback.searchParams.get("proxy") !== "1") {
+            fallback.searchParams.set("proxy", "1");
+            response = await fetchImage(`${fallback.pathname}?${fallback.searchParams.toString()}`);
+          }
+        } catch {}
       }
 
-      if (!response.ok || !response.body) {
-        skippedFiles += 1;
-        continue;
-      }
-
-      const contentType = (response.headers.get("content-type") || "").toLowerCase();
-      if (contentType && !contentType.startsWith("image/")) {
-        await response.body.cancel().catch(() => undefined);
+      if (!response?.body) {
         skippedFiles += 1;
         continue;
       }
