@@ -1,5 +1,6 @@
 const ALLOWED_HOSTS = [
   "vmodel.ai",
+  "data.vmodel.ai",
   "vmimgs.com",
   "replicate.delivery",
   "fal.media",
@@ -27,9 +28,15 @@ function isImageKitHost(hostname: string) {
     Boolean(configured && host === configured);
 }
 
+function isVercelBlobHost(hostname: string) {
+  const host = hostname.toLowerCase();
+  return host === "blob.vercel-storage.com" ||
+    host.endsWith(".blob.vercel-storage.com");
+}
+
 function isAllowedImageUrl(imageUrl: URL) {
   if (imageUrl.protocol !== "https:") return false;
-  if (isImageKitHost(imageUrl.hostname)) return true;
+  if (isImageKitHost(imageUrl.hostname) || isVercelBlobHost(imageUrl.hostname)) return true;
   return ALLOWED_HOSTS.some(
     (host) =>
       imageUrl.hostname === host ||
@@ -84,6 +91,16 @@ function directImageKitUrl(
     parsed.searchParams.delete("ik-attachment-filename");
   }
 
+  return parsed.toString();
+}
+
+function directVercelBlobUrl(
+  imageUrl: URL,
+  disposition: "inline" | "attachment",
+) {
+  const parsed = new URL(imageUrl.toString());
+  if (disposition === "attachment") parsed.searchParams.set("download", "1");
+  else parsed.searchParams.delete("download");
   return parsed.toString();
 }
 
@@ -181,16 +198,16 @@ export async function GET(request: Request) {
 
   // Normal individual downloads go straight from ImageKit CDN to the browser.
   // ZIP disk-streaming uses proxy=1 so browser CORS cannot break a large batch.
-  if (isImageKitHost(imageUrl.hostname) && !forceProxy) {
+  if (!forceProxy && (isImageKitHost(imageUrl.hostname) || isVercelBlobHost(imageUrl.hostname))) {
     const extension = extensionFrom("", imageUrl);
     const filename = safeFilename(
       requestUrl.searchParams.get("filename"),
       extension,
     );
-    return Response.redirect(
-      directImageKitUrl(imageUrl, filename, disposition),
-      307,
-    );
+    const destination = isImageKitHost(imageUrl.hostname)
+      ? directImageKitUrl(imageUrl, filename, disposition)
+      : directVercelBlobUrl(imageUrl, disposition);
+    return Response.redirect(destination, 307);
   }
 
   try {
