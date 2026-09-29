@@ -9,6 +9,10 @@ import {
   getAllVModelTokenContexts,
   unpackVModelTaskId,
 } from "./vmodel-token";
+import {
+  fetchVModelAsset,
+  fetchVModelTask,
+} from "./vmodel-request";
 
 const RESULT_EXTENSIONS = ["png", "webp", "jpg", "jpeg", "avif"] as const;
 
@@ -38,16 +42,7 @@ function extensionFromType(contentType: string, sourceUrl: string) {
 }
 
 async function fetchOriginalBinary(sourceUrl: string, token = "") {
-  const headers = new Headers({
-    Accept: "image/png,image/jpeg,image/webp,image/avif,image/*,*/*;q=0.8",
-  });
-  if (token) headers.set("Authorization", `Bearer ${token}`);
-
-  const response = await fetch(sourceUrl, {
-    cache: "no-store",
-    redirect: "follow",
-    headers,
-  });
+  const response = await fetchVModelAsset(sourceUrl, token);
   if (!response.ok) {
     throw new Error(`Generated original could not be fetched (${response.status}).`);
   }
@@ -211,20 +206,7 @@ export async function persistKnownVModelResult(
 }
 
 async function fetchTaskWithToken(taskId: string, token = "") {
-  const headers = new Headers();
-  if (token) headers.set("Authorization", `Bearer ${token}`);
-
-  const response = await fetch(
-    `https://api.vmodel.ai/api/tasks/v1/get/${encodeURIComponent(taskId)}`,
-    {
-      headers,
-      cache: "no-store",
-    },
-  );
-
-  const data = await response.json().catch(() => ({})) as {
-    result?: { status?: string; output?: string[]; error?: string };
-  };
+  const { response, data } = await fetchVModelTask(taskId, token);
 
   if (
     response.ok &&
