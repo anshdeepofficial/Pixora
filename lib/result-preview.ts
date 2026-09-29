@@ -4,6 +4,7 @@ import {
   imageKitConfigured,
   uploadImageKitData,
 } from "./imagekit";
+import { fetchVModelAsset } from "./vmodel-request";
 
 const PREVIEW_MAX_SOURCE_BYTES = 160 * 1024 * 1024;
 const PREVIEW_WIDTH = 1280;
@@ -30,14 +31,15 @@ export async function createStoredResultPreview(
   const existing = await getStoredResultPreview(taskId, fingerprint);
   if (existing) return existing;
 
-  const headers = new Headers({ Accept: "image/png,image/jpeg,image/webp,image/*,*/*;q=0.8" });
-  if (token) headers.set("Authorization", `Bearer ${token}`);
-
-  const response = await fetch(sourceUrl, {
-    cache: "no-store",
-    redirect: "follow",
-    headers,
-  });
+  const response = await fetchVModelAsset(
+    sourceUrl,
+    token || "",
+    {
+      headers: {
+        Accept: "image/png,image/jpeg,image/webp,image/*,*/*;q=0.8",
+      },
+    },
+  );
   if (!response.ok) throw new Error(`Could not fetch generated image for preview (${response.status}).`);
 
   const contentType = (response.headers.get("content-type") || "").toLowerCase();
