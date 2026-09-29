@@ -10,7 +10,7 @@ const MAX_FILE_BYTES = 12 * 1024 * 1024;
 const BATCH_PIPELINE_CONCURRENCY = 8;
 const BATCH_UPLOAD_CONCURRENCY = 2;
 const HISTORY_TTL_MS = 60 * 60 * 1000;
-const APP_VERSION = "1.6.0";
+const APP_VERSION = "1.6.1";
 const APP_VERSION_KEY = "pixora-app-version";
 
 type Mode = "single" | "batch" | "reference";
@@ -1042,6 +1042,25 @@ export default function Editor() {
     return prepareDownloadTarget(url, filename, "attachment");
   }
 
+  function prepareZipStreamTarget(url: string, filename: string) {
+    const target = originalDownloadUrl(url, filename, "inline");
+    const parsed = new URL(target, window.location.origin);
+
+    // Fresh task-backed results are already same-origin and authenticated by
+    // /api/result, so do not POST/HEAD them before downloading into the ZIP.
+    if (parsed.pathname === "/api/result") {
+      return `${parsed.pathname}?${parsed.searchParams.toString()}`;
+    }
+
+    // Non-task results are kept same-origin for CORS-safe ZIP assembly.
+    if (parsed.pathname === "/api/download") {
+      parsed.searchParams.set("proxy", "1");
+      return `${parsed.pathname}?${parsed.searchParams.toString()}`;
+    }
+
+    return target;
+  }
+
   function triggerPreparedDownload(downloadUrl: string, filename: string) {
     const anchor = document.createElement("a");
     anchor.href = downloadUrl;
@@ -1116,8 +1135,8 @@ export default function Editor() {
         }));
 
         setDownloadProgress({
-          percent: 2,
-          label: `Preparing ${urls.length} originals before download…`,
+          percent: 0,
+          label: `Building ZIP one image at a time · 0/${urls.length}`,
           state: "working",
         });
 
@@ -1128,26 +1147,25 @@ export default function Editor() {
               ? `${formatBytes(progress.loadedBytes)} / ${formatBytes(progress.totalBytes)}`
               : `${formatBytes(progress.loadedBytes)} prepared`;
 
+            const current = Math.min(
+              progress.totalFiles,
+              progress.filesDone + (progress.phase === "preparing" ? 1 : 0),
+            );
             setDownloadProgress({
               percent: progress.percent,
               label: progress.phase === "preparing"
-                ? `Checking originals · ${progress.filesDone}/${progress.totalFiles}`
-                : `Building ZIP inside Pixora · ${sizeText} · ${progress.filesDone}/${progress.totalFiles}`,
+                ? `Recovering original ${current}/${progress.totalFiles}…`
+                : `ZIP building · ${progress.filesDone}/${progress.totalFiles} added · ${sizeText}`,
               state: "working",
             });
           },
-          async (source) => {
-            const prepared = await prepareDownloadTarget(
+          async (source) => ({
+            url: prepareZipStreamTarget(
               source.url,
               source.filename,
-              "inline",
-              true,
-            );
-            return {
-              url: prepared.url,
-              size: prepared.size,
-            };
-          },
+            ),
+            size: 0,
+          }),
         );
 
         if (result.saved !== urls.length || result.skipped > 0) {
