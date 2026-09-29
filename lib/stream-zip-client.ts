@@ -448,7 +448,7 @@ export async function streamZipToDisk(
 type MemoryZipSource = {
   url: string;
   filename: string;
-  size?: number;
+  size: number;
 };
 
 async function fetchZipImage(sourceUrl: string) {
