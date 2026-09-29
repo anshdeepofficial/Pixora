@@ -69,11 +69,10 @@ async function prepareSource(rawUrl: string, origin: string, index: number): Pro
   }
 
   if (parsed.pathname === "/api/result") {
-    const packedId = parsed.searchParams.get("id") || "";
-    const result = await resolvePackedVModelResult(packedId);
+    parsed.searchParams.set("disposition", "inline");
     return {
-      url: imageKitOriginalUrl(result.url),
-      filename: `Pixora-${String(index + 1).padStart(4, "0")}.${result.extension || "png"}`,
+      url: parsed.toString(),
+      filename: `Pixora-${String(index + 1).padStart(4, "0")}.png`,
     };
   }
 
@@ -81,13 +80,21 @@ async function prepareSource(rawUrl: string, origin: string, index: number): Pro
     const nested = parsed.searchParams.get("url");
     if (nested) {
       try {
-        parsed = new URL(nested);
+        parsed = new URL(nested, origin);
       } catch {}
     }
   }
 
+  if (parsed.pathname === "/api/result") {
+    parsed.searchParams.set("disposition", "inline");
+    return {
+      url: parsed.toString(),
+      filename: `Pixora-${String(index + 1).padStart(4, "0")}.png`,
+    };
+  }
+
   if (!parsed.hostname.endsWith("imagekit.io")) {
-    throw new Error(`Image ${index + 1} is not stored on Pixora's download CDN yet.`);
+    throw new Error(`Image ${index + 1} is not currently reachable from Pixora storage.`);
   }
 
   return {
