@@ -10,7 +10,7 @@ const MAX_FILE_BYTES = 12 * 1024 * 1024;
 const BATCH_PIPELINE_CONCURRENCY = 8;
 const BATCH_UPLOAD_CONCURRENCY = 2;
 const HISTORY_TTL_MS = 60 * 60 * 1000;
-const APP_VERSION = "1.5.7";
+const APP_VERSION = "1.5.8";
 const APP_VERSION_KEY = "pixora-app-version";
 
 type Mode = "single" | "batch" | "reference";
