@@ -10,7 +10,7 @@ const MAX_FILE_BYTES = 12 * 1024 * 1024;
 const BATCH_PIPELINE_CONCURRENCY = 8;
 const BATCH_UPLOAD_CONCURRENCY = 2;
 const HISTORY_TTL_MS = 60 * 60 * 1000;
-const APP_VERSION = "1.5.6";
+const APP_VERSION = "1.5.7";
 const APP_VERSION_KEY = "pixora-app-version";
 
 type Mode = "single" | "batch" | "reference";
@@ -1072,52 +1072,61 @@ export default function Editor() {
       // Chrome/Edge: stream originals one-by-one straight to the user's disk.
       // No browser RAM pile-up and no single long-running Vercel ZIP response.
       if (supportsStreamingZip()) {
-        const sources = urls.map((url, index) => ({
-          url,
-          filename: `Pixora-${batchId}-${String(index + 1).padStart(4, "0")}.png`,
-        }));
+        try {
+          const sources = urls.map((url, index) => ({
+            url,
+            filename: `Pixora-${batchId}-${String(index + 1).padStart(4, "0")}.png`,
+          }));
 
-        const result = await streamZipToDisk(
-          sources,
-          `Pixora-${batchId}.zip`,
-          (progress) => {
-            const sizeText = progress.totalBytes > 0
-              ? `${formatBytes(progress.loadedBytes)} / ${formatBytes(progress.totalBytes)}`
-              : `${formatBytes(progress.loadedBytes)} written`;
+          const result = await streamZipToDisk(
+            sources,
+            `Pixora-${batchId}.zip`,
+            (progress) => {
+              const sizeText = progress.totalBytes > 0
+                ? `${formatBytes(progress.loadedBytes)} / ${formatBytes(progress.totalBytes)}`
+                : `${formatBytes(progress.loadedBytes)} written`;
 
-            setDownloadProgress({
-              percent: progress.percent,
-              label: progress.phase === "preparing"
-                ? `Checking originals · ${progress.filesDone}/${progress.totalFiles}${progress.skippedFiles ? ` · ${progress.skippedFiles} unavailable` : ""}`
-                : `Saving ZIP · ${sizeText} · ${progress.filesDone}/${progress.totalFiles}${progress.skippedFiles ? ` · ${progress.skippedFiles} skipped` : ""}`,
-              state: "working",
-            });
-          },
-          async (source) => {
-            const prepared = await prepareDownloadTarget(
-              source.url,
-              source.filename,
-              "inline",
-              true,
-            );
-            return {
-              url: prepared.url,
-              size: prepared.size,
-            };
-          },
-        );
+              setDownloadProgress({
+                percent: progress.percent,
+                label: progress.phase === "preparing"
+                  ? `Checking originals · ${progress.filesDone}/${progress.totalFiles}${progress.skippedFiles ? ` · ${progress.skippedFiles} unavailable` : ""}`
+                  : `Saving ZIP · ${sizeText} · ${progress.filesDone}/${progress.totalFiles}${progress.skippedFiles ? ` · ${progress.skippedFiles} skipped` : ""}`,
+                state: "working",
+              });
+            },
+            async (source) => {
+              const prepared = await prepareDownloadTarget(
+                source.url,
+                source.filename,
+                "inline",
+                false,
+              );
+              return {
+                url: prepared.url,
+                size: prepared.size,
+              };
+            },
+          );
 
-        setDownloadedUrls((current) =>
-          Array.from(new Set([...current, ...urls])),
-        );
-        setDownloadProgress({
-          percent: 100,
-          label: result.skipped > 0
-            ? `ZIP saved · ${result.saved} originals · ${result.skipped} unavailable`
-            : `ZIP saved · ${result.saved} originals`,
-          state: "done",
-        });
-        return;
+          setDownloadedUrls((current) =>
+            Array.from(new Set([...current, ...urls])),
+          );
+          setDownloadProgress({
+            percent: 100,
+            label: result.skipped > 0
+              ? `ZIP saved · ${result.saved} originals · ${result.skipped} unavailable`
+              : `ZIP saved · ${result.saved} originals`,
+            state: "done",
+          });
+          return;
+        } catch (directZipError) {
+          console.warn("Direct CDN ZIP failed; falling back to server ZIP", directZipError);
+          setDownloadProgress({
+            percent: 10,
+            label: "Direct CDN ZIP unavailable · switching to server fallback…",
+            state: "working",
+          });
+        }
       }
 
       // Fallback for browsers without File System Access API.
