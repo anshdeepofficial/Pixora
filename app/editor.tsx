@@ -2,7 +2,7 @@
 
 import { ChangeEvent, DragEvent, useEffect, useMemo, useRef, useState } from "react";
 import { upload } from "@vercel/blob/client";
-import { streamZipToDisk, supportsStreamingZip } from "../lib/stream-zip-client";
+import { buildZipBlob, isMobileBrowser, streamZipToDisk, supportsStreamingZip } from "../lib/stream-zip-client";
 
 const ratios = ["default", "1:1", "3:2", "2:3", "9:16", "16:9", "3:4", "4:3"];
 const MAX_BATCH = 50;
@@ -10,7 +10,7 @@ const MAX_FILE_BYTES = 12 * 1024 * 1024;
 const BATCH_PIPELINE_CONCURRENCY = 8;
 const BATCH_UPLOAD_CONCURRENCY = 2;
 const HISTORY_TTL_MS = 60 * 60 * 1000;
-const APP_VERSION = "1.5.9";
+const APP_VERSION = "1.6.0";
 const APP_VERSION_KEY = "pixora-app-version";
 
 type Mode = "single" | "batch" | "reference";
@@ -1107,6 +1107,77 @@ export default function Editor() {
     const batchId = uniqueDownloadNumber();
 
     if (kind === "zip") {
+      // Desktop: build the complete ZIP inside Pixora first. Chrome only sees
+      // one finished local file after every selected original is present.
+      if (!isMobileBrowser()) {
+        const sources = urls.map((url, index) => ({
+          url,
+          filename: `Pixora-${batchId}-${String(index + 1).padStart(4, "0")}.png`,
+        }));
+
+        setDownloadProgress({
+          percent: 2,
+          label: `Preparing ${urls.length} originals before download…`,
+          state: "working",
+        });
+
+        const result = await buildZipBlob(
+          sources,
+          (progress) => {
+            const sizeText = progress.totalBytes > 0
+              ? `${formatBytes(progress.loadedBytes)} / ${formatBytes(progress.totalBytes)}`
+              : `${formatBytes(progress.loadedBytes)} prepared`;
+
+            setDownloadProgress({
+              percent: progress.percent,
+              label: progress.phase === "preparing"
+                ? `Checking originals · ${progress.filesDone}/${progress.totalFiles}`
+                : `Building ZIP inside Pixora · ${sizeText} · ${progress.filesDone}/${progress.totalFiles}`,
+              state: "working",
+            });
+          },
+          async (source) => {
+            const prepared = await prepareDownloadTarget(
+              source.url,
+              source.filename,
+              "inline",
+              true,
+            );
+            return {
+              url: prepared.url,
+              size: prepared.size,
+            };
+          },
+        );
+
+        if (result.saved !== urls.length || result.skipped > 0) {
+          throw new Error(
+            `ZIP was not started because only ${result.saved} of ${urls.length} originals were recovered. Retry once so Pixora can recover the missing files.`,
+          );
+        }
+
+        setDownloadProgress({
+          percent: 99,
+          label: `ZIP complete · ${result.saved} originals · starting one download…`,
+          state: "working",
+        });
+
+        const localUrl = URL.createObjectURL(result.blob);
+        triggerPreparedDownload(localUrl, `Pixora-${batchId}.zip`);
+        window.setTimeout(() => URL.revokeObjectURL(localUrl), 60_000);
+
+        setDownloadedUrls((current) =>
+          Array.from(new Set([...current, ...urls])),
+        );
+        setDownloadProgress({
+          percent: 100,
+          label: `ZIP download started · ${result.saved} originals`,
+          state: "done",
+        });
+        return;
+      }
+
+      // Mobile keeps the existing ZIP behavior.
       // Chrome/Edge: stream originals one-by-one straight to the user's disk.
       // No browser RAM pile-up and no single long-running Vercel ZIP response.
       if (supportsStreamingZip()) {
