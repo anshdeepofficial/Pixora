@@ -1,5 +1,6 @@
 const ALLOWED_HOSTS = [
   "vmodel.ai",
+  "data.vmodel.ai",
   "vmimgs.com",
   "replicate.delivery",
   "fal.media",
@@ -111,7 +112,11 @@ async function resolveAllowedImage(request: Request) {
     };
   }
 
-  if (!isAllowedImageUrl(imageUrl)) {
+  const isOwnResult =
+    imageUrl.origin === requestUrl.origin &&
+    imageUrl.pathname === "/api/result";
+
+  if (!isOwnResult && !isAllowedImageUrl(imageUrl)) {
     return {
       error: Response.json(
         { error: `This image host is not allowed: ${imageUrl.hostname}` },
@@ -124,7 +129,7 @@ async function resolveAllowedImage(request: Request) {
     imageUrl = originalImageKitUrl(imageUrl);
   }
 
-  return { requestUrl, imageUrl };
+  return { requestUrl, imageUrl, isOwnResult };
 }
 
 export async function HEAD(request: Request) {
