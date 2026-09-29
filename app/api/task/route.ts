@@ -64,8 +64,11 @@ export async function GET(request: Request) {
       previewUrl = imageKitPreviewUrl(stored.url, 1280, 78);
     } catch (error) {
       console.error("Could not persist Pixora result", error);
-      // Keep the task usable even if CDN persistence is temporarily unavailable.
-      downloadUrl = new URL(`/api/result?id=${encodeURIComponent(packedId)}`, request.url).toString();
+      // A completed VModel result must remain immediately usable even when
+      // ImageKit persistence fails. Keep the still-live original URL for
+      // downloads and use the authenticated preview route only for display.
+      output = data.result.output;
+      downloadUrl = originalOutput;
       previewUrl = new URL(`/api/result-preview?id=${encodeURIComponent(packedId)}`, request.url).toString();
     }
 
