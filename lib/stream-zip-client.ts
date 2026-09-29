@@ -236,7 +236,7 @@ export async function streamZipToDisk(
     let preparedCount = 0;
     let skippedFiles = 0;
 
-    const prepared = await mapLimit(sources, 8, async (source, index) => {
+    const prepared = await mapLimit(sources, 1, async (source, index) => {
       try {
         const next = prepareSource
           ? await prepareSource(source, index)
