@@ -499,72 +499,62 @@ export async function buildZipBlob(
     index: number,
   ) => Promise<PreparedSource>,
 ) {
-  let preparedCount = 0;
   let skippedFiles = 0;
-
-  // Keep preparation sequential so VModel recovery stays inside its endpoint
-  // throttle. Desktop waits for the complete archive before downloading.
-  const prepared = await mapLimit(sources, 1, async (source, index) => {
-    try {
-      const next = prepareSource
-        ? await prepareSource(source, index)
-        : { url: source.url, size: 0 };
-
-      if (next.skip) {
-        skippedFiles += 1;
-        return null;
-      }
-
-      return {
-        ...source,
-        url: next.url,
-        size: typeof next.size === "number" ? next.size : 0,
-      };
-    } catch {
-      skippedFiles += 1;
-      return null;
-    } finally {
-      preparedCount += 1;
-      onProgress({
-        loadedBytes: 0,
-        totalBytes: 0,
-        filesDone: preparedCount,
-        totalFiles: sources.length,
-        skippedFiles,
-        percent: Math.min(
-          12,
-          (preparedCount / Math.max(1, sources.length)) * 12,
-        ),
-        phase: "preparing",
-      });
-    }
-  });
-
-  const preparedSources = prepared.filter(
-    (
-      item,
-    ): item is MemoryZipSource => Boolean(item),
-  );
-
-  if (!preparedSources.length) {
-    throw new Error("None of the selected originals could be prepared.");
-  }
-
-  const totalBytes = preparedSources.reduce(
-    (sum, source) => sum + (source.size || 0),
-    0,
-  );
+  let loadedBytes = 0;
+  let offset = 0;
 
   const chunks: ArrayBuffer[] = [];
   const central: Uint8Array[] = [];
   const encoder = new TextEncoder();
-  let offset = 0;
-  let loadedBytes = 0;
 
-  for (let index = 0; index < preparedSources.length; index++) {
-    const source = preparedSources[index];
-    const response = await fetchZipImage(source.url);
+  async function fetchWithRetry(value: string, attempts = 4) {
+    for (let attempt = 0; attempt < attempts; attempt++) {
+      const response = await fetchZipImage(value);
+      if (response?.body) return response;
+      if (attempt < attempts - 1) {
+        await new Promise((resolve) =>
+          window.setTimeout(resolve, 700 + (attempt * 350)),
+        );
+      }
+    }
+    return null;
+  }
 
+  // Single-pass desktop pipeline:
+  // recover one original -> stream it into ZIP -> move to the next image.
+  // There is no separate "verify all 50 first" phase.
+  for (let index = 0; index < sources.length; index++) {
+    const source = sources[index];
+
+    onProgress({
+      loadedBytes,
+      totalBytes: 0,
+      filesDone: central.length,
+      totalFiles: sources.length,
+      skippedFiles,
+      percent: Math.min(
+        97,
+        (index / Math.max(1, sources.length)) * 97,
+      ),
+      phase: "preparing",
+    });
+
+    let preparedUrl = source.url;
+    try {
+      if (prepareSource) {
+        const prepared = await prepareSource(source, index);
+        if (prepared.skip) {
+          skippedFiles += 1;
+          continue;
+        }
+        preparedUrl = prepared.url;
+      }
+    } catch {
+      skippedFiles += 1;
+      continue;
+    }
+
+    const response = await fetchWithRetry(preparedUrl);
     if (!response?.body) {
       skippedFiles += 1;
       continue;
@@ -599,18 +589,18 @@ export async function buildZipBlob(
       loadedBytes += value.length;
       offset += value.length;
 
-      const percent = totalBytes > 0
-        ? Math.min(98, 12 + ((loadedBytes / totalBytes) * 86))
-        : Math.min(
-            98,
-            12 + (((index + 0.5) / preparedSources.length) * 86),
-          );
+      const fileProgress =
+        size > 0 ? 0.55 : 0.25;
+      const percent = Math.min(
+        98,
+        ((index + fileProgress) / Math.max(1, sources.length)) * 98,
+      );
 
       onProgress({
         loadedBytes,
-        totalBytes,
+        totalBytes: 0,
         filesDone: central.length,
-        totalFiles: preparedSources.length,
+        totalFiles: sources.length,
         skippedFiles,
         percent,
         phase: "streaming",
@@ -628,16 +618,14 @@ export async function buildZipBlob(
 
     onProgress({
       loadedBytes,
-      totalBytes,
+      totalBytes: 0,
       filesDone: central.length,
-      totalFiles: preparedSources.length,
+      totalFiles: sources.length,
       skippedFiles,
-      percent: totalBytes > 0
-        ? Math.min(98, 12 + ((loadedBytes / totalBytes) * 86))
-        : Math.min(
-            98,
-            12 + (((index + 1) / preparedSources.length) * 86),
-          ),
+      percent: Math.min(
+        98,
+        (central.length / Math.max(1, sources.length)) * 98,
+      ),
       phase: "streaming",
     });
   }
@@ -684,9 +672,9 @@ export async function buildZipBlob(
 
   onProgress({
     loadedBytes,
-    totalBytes,
+    totalBytes: loadedBytes,
     filesDone: central.length,
-    totalFiles: preparedSources.length,
+    totalFiles: sources.length,
     skippedFiles,
     percent: 100,
     phase: "streaming",
