@@ -54,10 +54,18 @@ export default function CredentialControl() {
   const [switching, setSwitching] = useState("");
 
   async function loadInfo() {
-    const response = await fetch("/api/admin/token", { cache: "no-store" });
-    if (response.status === 401) return;
+    const response = await fetch(`/api/admin/token?ts=${Date.now()}`, {
+      cache: "no-store",
+      headers: { "Cache-Control": "no-cache" },
+    });
+    if (response.status === 401) return null;
     const data = await response.json() as TokenInfo;
-    if (response.ok) { setUnlocked(true); setInfo(data); }
+    if (response.ok) {
+      setUnlocked(true);
+      setInfo(data);
+      return data;
+    }
+    return null;
   }
 
   useEffect(() => { void loadInfo(); }, []);
@@ -126,18 +134,50 @@ export default function CredentialControl() {
   }
 
   async function activateApi(fingerprint: string) {
+    if (switching) return;
     setSwitching(fingerprint);
     setMessage("");
-    const response = await fetch("/api/admin/token", {
-      method: "PATCH",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ fingerprint }),
-    });
-    const data = await response.json() as TokenResponse;
-    setSwitching("");
-    if (!response.ok) return setMessage(data.error || "Could not activate this API.");
-    setInfo(data);
-    setMessage("API switched. New generation requests will use this key immediately.");
+
+    try {
+      const response = await fetch(`/api/admin/token?ts=${Date.now()}`, {
+        method: "PATCH",
+        headers: {
+          "Content-Type": "application/json",
+          "Cache-Control": "no-cache",
+        },
+        body: JSON.stringify({ fingerprint }),
+        cache: "no-store",
+      });
+      const data = await response.json() as TokenResponse;
+
+      if (!response.ok) {
+        setMessage(data.error || "Could not activate this API.");
+        return;
+      }
+
+      setInfo(data);
+
+      // Verify the active fingerprint after the write. This prevents the UI
+      // from showing a successful switch while a stale storage read still
+      // points at the previous key.
+      let verified = data.activeFingerprint === fingerprint;
+      for (let attempt = 0; attempt < 4 && !verified; attempt++) {
+        await new Promise((resolve) => window.setTimeout(resolve, 250 + (attempt * 200)));
+        const latest = await loadInfo();
+        verified = latest?.activeFingerprint === fingerprint;
+      }
+
+      if (!verified) {
+        setMessage("API switch was saved but could not be verified yet. Tap Use now once more.");
+        return;
+      }
+
+      setMessage("API switched and verified. Recovery/download requests can use this key now.");
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "Could not activate this API.");
+    } finally {
+      setSwitching("");
+    }
   }
 
   const generationLimit = info?.generationLimit || 300;
@@ -173,7 +213,9 @@ export default function CredentialControl() {
       <section className="apiRotation" aria-label="Saved VModel API rotation">
         <div className="apiRotationHead"><div><h2>API rotation</h2><p>{apis.length} saved {apis.length === 1 ? "API" : "APIs"} · numbering stays fixed in the order added</p></div><span>{generationLimit} max / API</span></div>
         {apis.length ? <div className="apiList">{apis.map((api, index) => {
-          const current = api.status === "Currently using";
+          const current = info?.activeFingerprint
+            ? api.fingerprint === info.activeFingerprint
+            : api.status === "Currently using";
           const percent = Math.min(100, (api.generated / generationLimit) * 100);
           const displayStatus = api.status.startsWith("Queued") ? "Queued" : api.status;
           return <article key={api.fingerprint} className={current ? "current" : ""}>
