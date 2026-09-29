@@ -6,6 +6,7 @@ import {
   vModelTokenFingerprint,
 } from "../../../lib/vmodel-token";
 import { uploadImageKitData } from "../../../lib/imagekit";
+import { createStoredResultPreview } from "../../../lib/result-preview";
 import {
   imageKitPreviewUrl,
   persistKnownVModelResult,
@@ -61,7 +62,23 @@ export async function GET(request: Request) {
 
       output = [stored.url, ...data.result.output.slice(1)];
       downloadUrl = stored.url;
-      previewUrl = imageKitPreviewUrl(stored.url, 1280, 78);
+
+      const lightweightPreview = imageKitPreviewUrl(stored.url, 1280, 78);
+      if (lightweightPreview !== stored.url) {
+        previewUrl = lightweightPreview;
+      } else {
+        try {
+          previewUrl = await createStoredResultPreview(
+            originalOutput,
+            unpacked.taskId,
+            fingerprint,
+            token,
+          ) || stored.url;
+        } catch (previewError) {
+          console.error("Could not create lightweight Pixora preview", previewError);
+          previewUrl = stored.url;
+        }
+      }
     } catch (error) {
       console.error("Could not persist Pixora result", error);
       // Keep the task usable even if CDN persistence is temporarily unavailable.
