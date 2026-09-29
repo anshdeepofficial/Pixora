@@ -436,3 +436,256 @@ export async function streamZipToDisk(
     throw error;
   }
 }
+
+
+type MemoryZipSource = {
+  url: string;
+  filename: string;
+  size?: number;
+};
+
+async function fetchZipImage(sourceUrl: string) {
+  const fetchImage = async (value: string) => {
+    try {
+      const candidate = await fetch(value, { cache: "no-store" });
+      const type = (candidate.headers.get("content-type") || "").toLowerCase();
+      if (candidate.ok && candidate.body && (!type || type.startsWith("image/"))) {
+        return candidate;
+      }
+      await candidate.body?.cancel().catch(() => undefined);
+    } catch {}
+    return null;
+  };
+
+  let response = await fetchImage(sourceUrl);
+
+  if (!response) {
+    try {
+      const fallback = new URL(sourceUrl, window.location.origin);
+      if (
+        fallback.pathname === "/api/download" &&
+        fallback.searchParams.get("proxy") !== "1"
+      ) {
+        fallback.searchParams.set("proxy", "1");
+        response = await fetchImage(
+          `${fallback.pathname}?${fallback.searchParams.toString()}`,
+        );
+      }
+    } catch {}
+  }
+
+  return response;
+}
+
+export function isMobileBrowser() {
+  if (typeof navigator === "undefined") return false;
+  return /Android|iPhone|iPad|iPod|Mobile|IEMobile|Opera Mini/i.test(
+    navigator.userAgent,
+  );
+}
+
+export async function buildZipBlob(
+  sources: Array<{ url: string; filename: string }>,
+  onProgress: (progress: ZipProgress) => void,
+  prepareSource?: (
+    source: { url: string; filename: string },
+    index: number,
+  ) => Promise<PreparedSource>,
+) {
+  let preparedCount = 0;
+  let skippedFiles = 0;
+
+  // Keep preparation sequential so VModel recovery stays inside its endpoint
+  // throttle. Desktop waits for the complete archive before downloading.
+  const prepared = await mapLimit(sources, 1, async (source, index) => {
+    try {
+      const next = prepareSource
+        ? await prepareSource(source, index)
+        : { url: source.url, size: 0 };
+
+      if (next.skip) {
+        skippedFiles += 1;
+        return null;
+      }
+
+      return {
+        ...source,
+        url: next.url,
+        size: typeof next.size === "number" ? next.size : 0,
+      };
+    } catch {
+      skippedFiles += 1;
+      return null;
+    } finally {
+      preparedCount += 1;
+      onProgress({
+        loadedBytes: 0,
+        totalBytes: 0,
+        filesDone: preparedCount,
+        totalFiles: sources.length,
+        skippedFiles,
+        percent: Math.min(
+          12,
+          (preparedCount / Math.max(1, sources.length)) * 12,
+        ),
+        phase: "preparing",
+      });
+    }
+  });
+
+  const preparedSources = prepared.filter(
+    (
+      item,
+    ): item is MemoryZipSource => Boolean(item),
+  );
+
+  if (!preparedSources.length) {
+    throw new Error("None of the selected originals could be prepared.");
+  }
+
+  const totalBytes = preparedSources.reduce(
+    (sum, source) => sum + (source.size || 0),
+    0,
+  );
+
+  const chunks: BlobPart[] = [];
+  const central: Uint8Array[] = [];
+  const encoder = new TextEncoder();
+  let offset = 0;
+  let loadedBytes = 0;
+
+  for (let index = 0; index < preparedSources.length; index++) {
+    const source = preparedSources[index];
+    const response = await fetchZipImage(source.url);
+
+    if (!response?.body) {
+      skippedFiles += 1;
+      continue;
+    }
+
+    const name = encoder.encode(source.filename);
+    const { dosTime, dosDate } = dosDateTime();
+    const localOffset = offset;
+    const header = localHeader(name, dosTime, dosDate);
+    chunks.push(header);
+    offset += header.length;
+
+    const reader = response.body.getReader();
+    let crc = 0xffffffff;
+    let size = 0;
+
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      if (!value?.length) continue;
+
+      size += value.length;
+      if (size > 0xffffffff) {
+        await reader.cancel();
+        throw new Error(
+          "A single image is larger than the current 4 GB ZIP entry limit.",
+        );
+      }
+
+      crc = crc32Update(crc, value);
+      chunks.push(value);
+      loadedBytes += value.length;
+      offset += value.length;
+
+      const percent = totalBytes > 0
+        ? Math.min(98, 12 + ((loadedBytes / totalBytes) * 86))
+        : Math.min(
+            98,
+            12 + (((index + 0.5) / preparedSources.length) * 86),
+          );
+
+      onProgress({
+        loadedBytes,
+        totalBytes,
+        filesDone: central.length,
+        totalFiles: preparedSources.length,
+        skippedFiles,
+        percent,
+        phase: "streaming",
+      });
+    }
+
+    crc = (crc ^ 0xffffffff) >>> 0;
+    const descriptor = dataDescriptor(crc, size);
+    chunks.push(descriptor);
+    offset += descriptor.length;
+
+    central.push(
+      centralHeader(name, dosTime, dosDate, crc, size, localOffset),
+    );
+
+    onProgress({
+      loadedBytes,
+      totalBytes,
+      filesDone: central.length,
+      totalFiles: preparedSources.length,
+      skippedFiles,
+      percent: totalBytes > 0
+        ? Math.min(98, 12 + ((loadedBytes / totalBytes) * 86))
+        : Math.min(
+            98,
+            12 + (((index + 1) / preparedSources.length) * 86),
+          ),
+      phase: "streaming",
+    });
+  }
+
+  if (!central.length) {
+    throw new Error("No downloadable originals remained after validation.");
+  }
+
+  const centralOffset = offset;
+  for (const record of central) {
+    chunks.push(record);
+    offset += record.length;
+  }
+  const centralSize = offset - centralOffset;
+
+  const needsZip64 =
+    centralOffset > 0xffffffff ||
+    centralSize > 0xffffffff ||
+    central.length > 0xffff;
+
+  if (needsZip64) {
+    const zip64Offset = offset;
+    const end = zip64End(central.length, centralSize, centralOffset);
+    chunks.push(end);
+    offset += end.length;
+
+    const locator = zip64Locator(zip64Offset);
+    chunks.push(locator);
+    offset += locator.length;
+  }
+
+  chunks.push(
+    endOfCentralDirectory(
+      central.length,
+      centralSize,
+      centralOffset,
+      needsZip64,
+    ),
+  );
+
+  const blob = new Blob(chunks, { type: "application/zip" });
+
+  onProgress({
+    loadedBytes,
+    totalBytes,
+    filesDone: central.length,
+    totalFiles: preparedSources.length,
+    skippedFiles,
+    percent: 100,
+    phase: "streaming",
+  });
+
+  return {
+    blob,
+    saved: central.length,
+    skipped: skippedFiles,
+  };
+}
