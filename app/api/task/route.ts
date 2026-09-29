@@ -10,6 +10,7 @@ import {
   imageKitPreviewUrl,
   persistKnownVModelResult,
 } from "../../../lib/result-storage";
+import { fetchVModelTask } from "../../../lib/vmodel-request";
 
 export async function GET(request: Request) {
   const packedId = new URL(request.url).searchParams.get("id") || "";
@@ -30,16 +31,10 @@ export async function GET(request: Request) {
   }
 
   const fingerprint = unpacked.fingerprint || vModelTokenFingerprint(token);
-  const response = await fetch(
-    `https://api.vmodel.ai/api/tasks/v1/get/${encodeURIComponent(unpacked.taskId)}`,
-    {
-      headers: { Authorization: `Bearer ${token}` },
-      cache: "no-store",
-    },
+  const { response, data } = await fetchVModelTask(
+    unpacked.taskId,
+    token,
   );
-  const data = await response.json().catch(() => ({})) as {
-    result?: { status?: string; output?: string[]; error?: string };
-  };
   if (!response.ok || !data.result) {
     return Response.json({ error: "Could not check generation." }, { status: 502 });
   }
@@ -68,8 +63,14 @@ export async function GET(request: Request) {
       // ImageKit persistence fails. Keep the still-live original URL for
       // downloads and use the authenticated preview route only for display.
       output = data.result.output;
-      downloadUrl = originalOutput;
-      previewUrl = new URL(`/api/result-preview?id=${encodeURIComponent(packedId)}`, request.url).toString();
+      downloadUrl = new URL(
+        `/api/result?id=${encodeURIComponent(packedId)}`,
+        request.url,
+      ).toString();
+      previewUrl = new URL(
+        `/api/result-preview?id=${encodeURIComponent(packedId)}`,
+        request.url,
+      ).toString();
     }
 
     try {
