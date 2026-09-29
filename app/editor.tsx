@@ -10,7 +10,7 @@ const MAX_FILE_BYTES = 12 * 1024 * 1024;
 const BATCH_PIPELINE_CONCURRENCY = 8;
 const BATCH_UPLOAD_CONCURRENCY = 2;
 const HISTORY_TTL_MS = 60 * 60 * 1000;
-const APP_VERSION = "1.5.8";
+const APP_VERSION = "1.5.9";
 const APP_VERSION_KEY = "pixora-app-version";
 
 type Mode = "single" | "batch" | "reference";
@@ -115,6 +115,44 @@ function originalImageUrl(url: string) {
   } catch {
     return url;
   }
+}
+
+const EMPTY_PREVIEW =
+  "data:image/gif;base64,R0lGODlhAQABAAD/ACwAAAAAAQABAAACADs=";
+
+function DeferredHistoryImage({
+  src,
+  alt,
+  index,
+}: {
+  src: string;
+  alt: string;
+  index: number;
+}) {
+  const [ready, setReady] = useState(false);
+
+  useEffect(() => {
+    const needsRecovery =
+      src.includes("/api/result-preview") ||
+      src.includes("/api/result?");
+
+    const delay = needsRecovery
+      ? Math.min(index, 60) * 650
+      : 0;
+
+    setReady(false);
+    const timer = window.setTimeout(() => setReady(true), delay);
+    return () => window.clearTimeout(timer);
+  }, [src, index]);
+
+  return (
+    <img
+      src={ready ? displayImageUrl(src, 720, 86) : EMPTY_PREVIEW}
+      alt={alt}
+      loading="lazy"
+      decoding="async"
+    />
+  );
 }
 
 export default function Editor() {
@@ -1195,7 +1233,7 @@ export default function Editor() {
       state: "working",
     });
 
-    const attempted = await mapLimit(urls, 8, async (url) => {
+    const attempted = await mapLimit(urls, 1, async (url) => {
       const filename = `Pixora-${uniqueDownloadNumber()}.png`;
       try {
         const item = await prepareNativeDownload(url, filename);
@@ -1486,7 +1524,7 @@ export default function Editor() {
           {history.length ? history.map((item, index) => <article key={item.createdAt} className={selected.includes(item.url) ? "selected" : ""} onClick={() => selecting ? toggleSelection(item.url) : openViewer(history.map((entry) => entry.url), index, history.map((entry) => entry.previewUrl || entry.url))} role="button" tabIndex={0} onKeyDown={(event) => event.key === "Enter" && (selecting ? toggleSelection(item.url) : openViewer(history.map((entry) => entry.url), index, history.map((entry) => entry.previewUrl || entry.url)))}>
             {selecting && <span className="check">{selected.includes(item.url) ? "✓" : ""}</span>}
             {!selecting && <button type="button" className="historyDelete" disabled={isProcessing} aria-label="Remove image from history" onClick={(event) => { event.stopPropagation(); removeHistoryItem(item, index); }}>×</button>}
-            <div className={`downloadVisual ${downloadedUrls.includes(item.url) ? "downloaded" : ""}`}><img src={displayImageUrl(item.previewUrl || item.url, 720, 86)} alt={item.prompt} loading="lazy" decoding="async" /><span className="downloadCheck">✓<small>Download started</small></span></div>
+            <div className={`downloadVisual ${downloadedUrls.includes(item.url) ? "downloaded" : ""}`}><DeferredHistoryImage src={item.previewUrl || item.url} alt={item.prompt} index={index} /><span className="downloadCheck">✓<small>Download started</small></span></div>
             <div className="historyCaption"><span>{item.prompt}</span>{!selecting && <button type="button" aria-label="Download image" onClick={(event) => { event.stopPropagation(); void downloadOne(item.url, index + 1); }}>↓</button>}</div>
           </article>) : <div className="emptyResult"><h3>No edits yet</h3><p>Edits are kept for 1 hour. Sign in to sync them across devices.</p></div>}
         </div>}
