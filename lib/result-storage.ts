@@ -1,4 +1,3 @@
-import { put } from "@vercel/blob";
 import {
   findImageKitAssetByName,
   findImageKitAssetsByName,
@@ -12,7 +11,6 @@ import {
 } from "./vmodel-token";
 
 const RESULT_EXTENSIONS = ["png", "webp", "jpg", "jpeg", "avif"] as const;
-const IMAGEKIT_SAFE_ORIGINAL_BYTES = 20 * 1024 * 1024;
 
 function resultFolder(fingerprint: string) {
   return `/pixora-results/${fingerprint}`;
@@ -151,173 +149,64 @@ async function findStoredVModelResultAnywhere(taskId: string) {
   return null;
 }
 
-async function fetchOriginalResponse(sourceUrl: string, token = "") {
-  const headers = new Headers({
-    Accept: "image/png,image/jpeg,image/webp,image/avif,image/*,*/*;q=0.8",
-  });
-  if (token) headers.set("Authorization", `Bearer ${token}`);
-
-  const response = await fetch(sourceUrl, {
-    cache: "no-store",
-    redirect: "follow",
-    headers,
-  });
-  if (!response.ok || !response.body) {
-    throw new Error(`Generated original could not be fetched (${response.status}).`);
-  }
-
-  const contentType = (response.headers.get("content-type") || "image/png").toLowerCase();
-  if (!contentType.startsWith("image/")) {
-    throw new Error("Generated output did not return an image.");
-  }
-
-  const size = Number(response.headers.get("content-length") || 0);
-  return {
-    response,
-    body: response.body,
-    contentType,
-    size: Number.isFinite(size) && size > 0 ? size : 0,
-    extension: extensionFromType(contentType, sourceUrl),
-  };
-}
-
-async function persistOriginalToBlob(
-  sourceUrl: string,
-  taskId: string,
-  fingerprint: string,
-  token = "",
-) {
-  const original = await fetchOriginalResponse(sourceUrl, token);
-  const blob = await put(
-    `pixora-results/${fingerprint}/${taskId}.${original.extension}`,
-    original.body,
-    {
-      access: "public",
-      addRandomSuffix: false,
-      allowOverwrite: true,
-      contentType: original.contentType,
-      multipart: true,
-      cacheControlMaxAge: 60 * 60 * 24,
-    },
-  );
-
-  return {
-    url: blob.url,
-    downloadUrl: blob.downloadUrl,
-    size: original.size,
-    extension: original.extension,
-    persisted: true,
-    storage: "vercel-blob" as const,
-  };
-}
-
 export async function persistKnownVModelResult(
   originalOutput: string,
   taskId: string,
   fingerprint: string,
   token = "",
 ) {
-  if (imageKitConfigured()) {
-    const existing =
-      await findStoredVModelResult(taskId, fingerprint) ||
-      await findStoredVModelResultAnywhere(taskId);
-    if (existing) {
-      return {
-        ...existing,
-        persisted: true,
-        storage: "imagekit" as const,
-      };
-    }
+  if (!imageKitConfigured()) {
+    return {
+      url: originalOutput,
+      size: 0,
+      extension: extensionFromUrl(originalOutput),
+      persisted: false,
+    };
   }
 
-  // Probe the real original once. Large PNGs can exceed ImageKit plan upload
-  // limits, so route them to multipart Blob storage instead of losing them.
-  let declaredSize = 0;
+  const existing =
+    await findStoredVModelResult(taskId, fingerprint) ||
+    await findStoredVModelResultAnywhere(taskId);
+  if (existing) return { ...existing, persisted: true };
+
+  // Primary path: Pixora itself fetches the completed original while the
+  // VModel task/key is definitely valid, then uploads those exact bytes.
+  // This avoids relying on ImageKit being able to fetch a temporary VModel URL.
   try {
-    const probe = await fetchOriginalResponse(originalOutput, token);
-    declaredSize = probe.size;
-    await probe.body.cancel().catch(() => undefined);
-  } catch {}
+    const original = await fetchOriginalBinary(originalOutput, token);
+    const stored = await uploadImageKitBinary(
+      original.data,
+      `${taskId}.${original.extension}`,
+      resultFolder(fingerprint),
+      original.contentType,
+      ["pixora-result", "pixora-original", `vmodel-${fingerprint}`],
+    );
 
-  if (declaredSize > IMAGEKIT_SAFE_ORIGINAL_BYTES) {
-    try {
-      return await persistOriginalToBlob(
-        originalOutput,
-        taskId,
-        fingerprint,
-        token,
-      );
-    } catch (blobError) {
-      console.error("Pixora large-result Blob persistence failed", blobError);
-    }
+    return {
+      url: stored.url,
+      size: stored.size,
+      extension: original.extension,
+      persisted: true,
+    };
+  } catch (binaryError) {
+    console.error("Pixora binary original persistence failed", binaryError);
   }
 
-  if (imageKitConfigured()) {
-    try {
-      const original = await fetchOriginalBinary(originalOutput, token);
-      const stored = await uploadImageKitBinary(
-        original.data,
-        `${taskId}.${original.extension}`,
-        resultFolder(fingerprint),
-        original.contentType,
-        ["pixora-result", "pixora-original", `vmodel-${fingerprint}`],
-      );
+  // Secondary path for public/signed outputs. This avoids throwing away a
+  // completed generation if a runtime cannot buffer the original bytes.
+  const extension = extensionFromUrl(originalOutput);
+  const stored = await uploadImageKitRemoteFile(
+    originalOutput,
+    `${taskId}.${extension}`,
+    resultFolder(fingerprint),
+    ["pixora-result", "pixora-original", `vmodel-${fingerprint}`],
+  );
 
-      return {
-        url: stored.url,
-        size: stored.size,
-        extension: original.extension,
-        persisted: true,
-        storage: "imagekit" as const,
-      };
-    } catch (binaryError) {
-      console.error("Pixora ImageKit binary persistence failed", binaryError);
-    }
-
-    try {
-      const extension = extensionFromUrl(originalOutput);
-      const stored = await uploadImageKitRemoteFile(
-        originalOutput,
-        `${taskId}.${extension}`,
-        resultFolder(fingerprint),
-        ["pixora-result", "pixora-original", `vmodel-${fingerprint}`],
-      );
-
-      return {
-        url: stored.url,
-        size: 0,
-        extension,
-        persisted: true,
-        storage: "imagekit" as const,
-      };
-    } catch (remoteError) {
-      console.error("Pixora ImageKit remote persistence failed", remoteError);
-    }
-  }
-
-  // If ImageKit rejected a large file and Blob was not tried yet, use multipart
-  // Blob as the final durable-storage attempt.
-  if (declaredSize <= IMAGEKIT_SAFE_ORIGINAL_BYTES) {
-    try {
-      return await persistOriginalToBlob(
-        originalOutput,
-        taskId,
-        fingerprint,
-        token,
-      );
-    } catch (blobError) {
-      console.error("Pixora Blob persistence fallback failed", blobError);
-    }
-  }
-
-  // Last resort: return the untouched VModel original so an immediate download
-  // still works. This is intentionally not marked persistent.
   return {
-    url: originalOutput,
-    size: declaredSize,
-    extension: extensionFromUrl(originalOutput),
-    persisted: false,
-    storage: "vmodel" as const,
+    url: stored.url,
+    size: 0,
+    extension,
+    persisted: true,
   };
 }
 
