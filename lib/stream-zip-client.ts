@@ -80,6 +80,13 @@ function concat(parts: Uint8Array[]) {
   return out;
 }
 
+function toArrayBuffer(bytes: Uint8Array) {
+  return bytes.buffer.slice(
+    bytes.byteOffset,
+    bytes.byteOffset + bytes.byteLength,
+  ) as ArrayBuffer;
+}
+
 function dosDateTime(date = new Date()) {
   const year = Math.max(1980, date.getFullYear());
   const dosTime = (date.getHours() << 11) | (date.getMinutes() << 5) | Math.floor(date.getSeconds() / 2);
@@ -548,7 +555,7 @@ export async function buildZipBlob(
     0,
   );
 
-  const chunks: BlobPart[] = [];
+  const chunks: ArrayBuffer[] = [];
   const central: Uint8Array[] = [];
   const encoder = new TextEncoder();
   let offset = 0;
@@ -567,7 +574,7 @@ export async function buildZipBlob(
     const { dosTime, dosDate } = dosDateTime();
     const localOffset = offset;
     const header = localHeader(name, dosTime, dosDate);
-    chunks.push(header);
+    chunks.push(toArrayBuffer(header));
     offset += header.length;
 
     const reader = response.body.getReader();
@@ -588,7 +595,7 @@ export async function buildZipBlob(
       }
 
       crc = crc32Update(crc, value);
-      chunks.push(value);
+      chunks.push(toArrayBuffer(value));
       loadedBytes += value.length;
       offset += value.length;
 
@@ -612,7 +619,7 @@ export async function buildZipBlob(
 
     crc = (crc ^ 0xffffffff) >>> 0;
     const descriptor = dataDescriptor(crc, size);
-    chunks.push(descriptor);
+    chunks.push(toArrayBuffer(descriptor));
     offset += descriptor.length;
 
     central.push(
@@ -641,7 +648,7 @@ export async function buildZipBlob(
 
   const centralOffset = offset;
   for (const record of central) {
-    chunks.push(record);
+    chunks.push(toArrayBuffer(record));
     offset += record.length;
   }
   const centralSize = offset - centralOffset;
@@ -654,20 +661,22 @@ export async function buildZipBlob(
   if (needsZip64) {
     const zip64Offset = offset;
     const end = zip64End(central.length, centralSize, centralOffset);
-    chunks.push(end);
+    chunks.push(toArrayBuffer(end));
     offset += end.length;
 
     const locator = zip64Locator(zip64Offset);
-    chunks.push(locator);
+    chunks.push(toArrayBuffer(locator));
     offset += locator.length;
   }
 
   chunks.push(
-    endOfCentralDirectory(
-      central.length,
-      centralSize,
-      centralOffset,
-      needsZip64,
+    toArrayBuffer(
+      endOfCentralDirectory(
+        central.length,
+        centralSize,
+        centralOffset,
+        needsZip64,
+      ),
     ),
   );
 
