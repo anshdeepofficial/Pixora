@@ -11,6 +11,10 @@ import {
   createStoredResultPreview,
   getStoredResultPreview,
 } from "../../../lib/result-preview";
+import {
+  fetchVModelAsset,
+  fetchVModelTask,
+} from "../../../lib/vmodel-request";
 
 async function liveResult(packedId: string) {
   const unpacked = unpackVModelTaskId(packedId);
@@ -31,16 +35,10 @@ async function liveResult(packedId: string) {
 
   for (const candidate of candidates) {
     try {
-      const response = await fetch(
-        `https://api.vmodel.ai/api/tasks/v1/get/${encodeURIComponent(unpacked.taskId)}`,
-        {
-          headers: { Authorization: `Bearer ${candidate.token}` },
-          cache: "no-store",
-        },
+      const { response, data } = await fetchVModelTask(
+        unpacked.taskId,
+        candidate.token,
       );
-      const data = await response.json().catch(() => ({})) as {
-        result?: { status?: string; output?: string[] };
-      };
 
       if (response.ok && data.result?.status === "succeeded" && data.result.output?.[0]) {
         return {
@@ -86,15 +84,10 @@ export async function GET(request: Request) {
 
       // Last-resort preview for a still-live task: proxy the original inline
       // using the API key so the UI shows an image instead of broken text.
-      const headers = new Headers({
-        Accept: "image/png,image/jpeg,image/webp,image/avif,image/*,*/*;q=0.8",
-        Authorization: `Bearer ${live.token}`,
-      });
-      const upstream = await fetch(live.url, {
-        cache: "no-store",
-        redirect: "follow",
-        headers,
-      });
+      const upstream = await fetchVModelAsset(
+        live.url,
+        live.token,
+      );
       if (upstream.ok && upstream.body) {
         const contentType = upstream.headers.get("content-type") || "image/png";
         if (contentType.toLowerCase().startsWith("image/")) {
